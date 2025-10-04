@@ -1,9 +1,8 @@
 export interface BusinessLead {
   name?: string;
-  email?: string;
+  emails?: string[];
   website?: string;
-  phone?: string;
-  address?: string;
+  phones?: string[];
 }
 
 export interface ScrapeResponse {
@@ -28,8 +27,7 @@ export async function scrapeBusinesses(query: string): Promise<ScrapeResponse> {
   try {
     // Replace with your actual Render backend URL
     const backendUrl =
-      process.env.NEXT_PUBLIC_SCRAPER_API_URL ||
-      "https://YOUR-RENDER-APP.onrender.com";
+      process.env.NEXT_PUBLIC_SCRAPER_API_URL || "http://localhost:3001";
     const url = `${backendUrl}/scrape?query=${encodeURIComponent(query)}`;
 
     const response = await fetch(url, {
@@ -42,9 +40,20 @@ export async function scrapeBusinesses(query: string): Promise<ScrapeResponse> {
 
     const data = await response.json();
 
+    // Enhanced logging for debugging
+    console.log("=== SCRAPER API RESPONSE DEBUG ===");
+    console.log("Raw response:", data);
+    console.log("Response keys:", Object.keys(data));
+
+    // Try multiple possible data locations
+    const leads = data.results;
+
+    // Ensure we're returning an array
+    const normalizedLeads = Array.isArray(leads) ? leads : [leads];
+
     return {
       success: true,
-      data: data.results || data.data || data,
+      data: normalizedLeads,
     };
   } catch (error) {
     console.error("Scraper API error:", error);
