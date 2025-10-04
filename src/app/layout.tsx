@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "LeadMate Scraper - Google Maps Lead Generation",
+  title: "LeadMate Scraper - Web Lead Generation",
   description:
-    "Extract business leads from Google Maps including emails, phone numbers, and websites",
+    "Extract business leads from the web including emails, phone numbers, and websites",
 };
 
 export default function RootLayout({

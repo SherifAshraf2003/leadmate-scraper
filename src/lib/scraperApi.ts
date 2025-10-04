@@ -34,9 +34,6 @@ export async function scrapeBusinesses(query: string): Promise<ScrapeResponse> {
 
     const response = await fetch(url, {
       method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-      },
     });
 
     if (!response.ok) {
