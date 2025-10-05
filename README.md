@@ -10,6 +10,8 @@ A Next.js 15 frontend application for scraping business leads from Google Maps. 
 - 🎨 Modern UI with Tailwind CSS
 - 🔗 Connects to external scraper API (hosted on Render)
 - ✅ Error handling and validation
+- 📊 **Google Sheets integration** - Auto-saves leads with duplicate detection
+- 💾 Export results as CSV or JSON
 
 ## Tech Stack
 
@@ -41,15 +43,23 @@ cd leadmate-scraper
 npm install
 ```
 
-3. Configure the backend API URL:
+3. Configure environment variables:
 
-Create a `.env.local` file in the root directory:
+Create a `.env.local` file in the root directory (see `.env.example` for reference):
 
 ```bash
+# Backend API
 NEXT_PUBLIC_SCRAPER_API_URL=https://YOUR-RENDER-APP.onrender.com
+
+# Google Sheets (optional but recommended)
+GOOGLE_SHEETS_SPREADSHEET_ID=your_spreadsheet_id
+GOOGLE_SHEETS_SHEET_NAME=Leads
+GOOGLE_SHEETS_CREDENTIALS='{"type":"service_account",...}'
 ```
 
 Replace `YOUR-RENDER-APP.onrender.com` with your actual Render backend URL.
+
+**For Google Sheets integration**, follow the detailed setup guide in [GOOGLE_SHEETS_SETUP.md](./GOOGLE_SHEETS_SETUP.md).
 
 ### Development
 
@@ -87,12 +97,18 @@ Vercel will automatically detect Next.js and configure everything.
 leadmate-scraper/
 ├── src/
 │   ├── app/
-│   │   ├── layout.tsx      # Root layout with metadata
-│   │   ├── page.tsx        # Main scraper UI
-│   │   └── globals.css     # Global styles
+│   │   ├── api/
+│   │   │   └── save-to-sheets/
+│   │   │       └── route.ts       # Google Sheets API endpoint
+│   │   ├── layout.tsx             # Root layout with metadata
+│   │   ├── page.tsx               # Main scraper UI
+│   │   └── globals.css            # Global styles
 │   └── lib/
-│       └── scraperApi.ts   # API client for backend
-├── public/                 # Static assets
+│       ├── scraperApi.ts          # API client for backend scraper
+│       └── googleSheets.ts        # Google Sheets integration
+├── public/                        # Static assets
+├── .env.example                   # Environment variables template
+├── GOOGLE_SHEETS_SETUP.md         # Google Sheets setup guide
 ├── package.json
 └── README.md
 ```
@@ -124,9 +140,14 @@ GET /scrape?query=YOUR_QUERY
 
 ## Environment Variables
 
-| Variable                      | Description              | Required |
-| ----------------------------- | ------------------------ | -------- |
-| `NEXT_PUBLIC_SCRAPER_API_URL` | Backend API URL (Render) | Yes      |
+| Variable                       | Description                      | Required |
+| ------------------------------ | -------------------------------- | -------- |
+| `NEXT_PUBLIC_SCRAPER_API_URL`  | Backend API URL (Render)         | Yes      |
+| `GOOGLE_SHEETS_SPREADSHEET_ID` | Google Sheets spreadsheet ID     | No\*     |
+| `GOOGLE_SHEETS_SHEET_NAME`     | Sheet name (defaults to "Leads") | No       |
+| `GOOGLE_SHEETS_CREDENTIALS`    | Service account JSON credentials | No\*     |
+
+\*Required for Google Sheets integration. See [GOOGLE_SHEETS_SETUP.md](./GOOGLE_SHEETS_SETUP.md) for setup instructions.
 
 ## Usage
 
@@ -135,6 +156,8 @@ GET /scrape?query=YOUR_QUERY
 3. Wait for results (may take 30-60 seconds)
 4. View extracted business leads with contact information
 5. Click on emails, phones, or websites to interact with them
+6. **Automatic**: Results are saved to your Google Sheet (if configured) with duplicate detection
+7. **Export**: Download results as CSV or JSON for offline use
 
 ## Notes
 
