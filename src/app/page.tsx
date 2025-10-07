@@ -1,7 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { scrapeBusinesses, type BusinessLead } from "@/lib/scraperApi";
+import {
+  scrapeBusinesses,
+  scrapeBusinessesBatch,
+  type BusinessLead,
+  type BatchProgress,
+} from "@/lib/scraperApi";
 
 // Download results as CSV
 const downloadCSV = (data: BusinessLead[]) => {
@@ -55,6 +60,10 @@ export default function Home() {
   const [results, setResults] = useState<BusinessLead[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [totalLeads, setTotalLeads] = useState(10);
+  const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(
+    null
+  );
 
   const handleScrape = async () => {
     if (!query.trim()) {
@@ -65,12 +74,27 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setResults(null);
+    setBatchProgress(null);
 
     try {
-      const response = await scrapeBusinesses(query);
+      let response;
+
+      // Use batch fetching if totalLeads > 10
+      if (totalLeads > 10) {
+        response = await scrapeBusinessesBatch(
+          query,
+          totalLeads,
+          (progress) => {
+            setBatchProgress(progress);
+          }
+        );
+      } else {
+        response = await scrapeBusinesses(query, 0, totalLeads);
+      }
 
       if (response.success && response.data) {
         setResults(response.data);
+        setBatchProgress(null);
       } else {
         setError(response.error || "Failed to scrape businesses");
       }
@@ -133,6 +157,26 @@ export default function Home() {
                   disabled={loading}
                 />
               </div>
+              <div className="flex flex-col sm:w-40">
+                <label
+                  htmlFor="totalLeads"
+                  className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                >
+                  Number of Leads
+                </label>
+                <input
+                  id="totalLeads"
+                  type="number"
+                  min="1"
+                  max="60"
+                  value={totalLeads}
+                  onChange={(e) =>
+                    setTotalLeads(Math.max(1, parseInt(e.target.value) || 1))
+                  }
+                  className="px-4 py-4 text-lg border-2 border-gray-300 dark:border-gray-600 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white transition-all duration-200 shadow-sm"
+                  disabled={loading}
+                />
+              </div>
               <button
                 onClick={handleScrape}
                 disabled={loading}
@@ -163,19 +207,152 @@ export default function Home() {
                 )}
               </button>
             </div>
+            {/* Quick select buttons */}
+            <div className="flex flex-wrap gap-2">
+              <span className="text-sm text-gray-600 dark:text-gray-400 self-center">
+                Quick select:
+              </span>
+              {[10, 20, 30, 40, 50, 60].map((num) => (
+                <button
+                  key={num}
+                  onClick={() => setTotalLeads(num)}
+                  disabled={loading}
+                  className={`px-3 py-1 text-sm rounded-lg transition-all ${
+                    totalLeads === num
+                      ? "bg-blue-600 text-white"
+                      : "bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600"
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {num}
+                </button>
+              ))}
+            </div>
+            {/* Rate limiting info */}
+            {totalLeads > 30 && (
+              <div className="bg-amber-50/80 dark:bg-amber-900/20 backdrop-blur-sm border border-amber-300 dark:border-amber-800 rounded-lg p-3">
+                <p className="text-sm text-amber-800 dark:text-amber-200 flex items-start gap-2">
+                  <svg
+                    className="w-4 h-4 mt-0.5 flex-shrink-0"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                  <span>
+                    <strong>High volume request:</strong> This will fetch{" "}
+                    {Math.ceil(totalLeads / 10)} batches with 5-8 second delays
+                    between requests. Estimated time: ~
+                    {Math.ceil((totalLeads / 10 - 1) * 6.5)} seconds. Consider
+                    waiting 30-60 minutes between sessions to avoid rate
+                    limiting.
+                  </span>
+                </p>
+              </div>
+            )}
           </div>
         </div>
+
+        {/* Best Practices Info */}
+        {!loading && !results && !error && (
+          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 backdrop-blur-sm border border-blue-200 dark:border-blue-800 rounded-2xl p-6 mb-8">
+            <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-200 mb-4 flex items-center gap-2">
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                <path
+                  fillRule="evenodd"
+                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                  clipRule="evenodd"
+                />
+              </svg>
+              Rate Limiting Best Practices
+            </h3>
+            <div className="grid md:grid-cols-2 gap-4 text-sm">
+              <div>
+                <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">
+                  ✅ Recommended Limits
+                </h4>
+                <ul className="space-y-1 text-blue-700 dark:text-blue-400">
+                  <li>• Conservative: 20 leads (safe for most cases)</li>
+                  <li>• Moderate: 30-40 leads (with delays)</li>
+                  <li>• Maximum: 60 leads (use with caution)</li>
+                  <li>• Wait 30-60 min between sessions</li>
+                </ul>
+              </div>
+              <div>
+                <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">
+                  ⚠️ Avoid
+                </h4>
+                <ul className="space-y-1 text-blue-700 dark:text-blue-400">
+                  <li>• Exceeding 100 leads per hour</li>
+                  <li>• Same query multiple times in a row</li>
+                  <li>• Running during off-hours (looks suspicious)</li>
+                  <li>• Skipping the automatic delays</li>
+                </ul>
+              </div>
+            </div>
+            <div className="mt-4 pt-4 border-t border-blue-200 dark:border-blue-700">
+              <p className="text-sm text-blue-700 dark:text-blue-400">
+                <strong>💡 Pro tip:</strong> Batch mode automatically adds 5-8
+                second delays between requests to avoid rate limiting and appear
+                more human-like.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Loading State */}
         {loading && (
           <div className="bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm rounded-2xl shadow-xl p-12 text-center border border-gray-200/50 dark:border-gray-700/50">
             <div className="inline-block animate-spin rounded-full h-16 w-16 border-4 border-blue-200 dark:border-blue-900 border-t-blue-600 dark:border-t-blue-400 mb-6"></div>
             <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
-              Searching for leads...
+              {batchProgress
+                ? `Fetching batch ${batchProgress.currentBatch} of ${batchProgress.totalBatches}...`
+                : "Searching for leads..."}
             </h3>
-            <p className="text-gray-600 dark:text-gray-400">
-              This may take a minute. Please be patient.
-            </p>
+            {batchProgress ? (
+              <div className="max-w-md mx-auto">
+                <div className="mb-4">
+                  <div className="flex justify-between text-sm text-gray-600 dark:text-gray-400 mb-2">
+                    <span>
+                      {batchProgress.totalLeads} leads collected so far
+                    </span>
+                    <span>
+                      {Math.round(
+                        (batchProgress.currentBatch /
+                          batchProgress.totalBatches) *
+                          100
+                      )}
+                      %
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3 overflow-hidden">
+                    <div
+                      className="bg-gradient-to-r from-blue-500 to-purple-500 h-full transition-all duration-300 ease-out"
+                      style={{
+                        width: `${
+                          (batchProgress.currentBatch /
+                            batchProgress.totalBatches) *
+                          100
+                        }%`,
+                      }}
+                    ></div>
+                  </div>
+                </div>
+                {batchProgress.delay && (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    ⏳ Waiting {batchProgress.delay}s before next batch (rate
+                    limiting)...
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-gray-600 dark:text-gray-400">
+                This may take a minute. Please be patient.
+              </p>
+            )}
           </div>
         )}
 
