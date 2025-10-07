@@ -64,6 +64,7 @@ export default function Home() {
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(
     null
   );
+  const [sheetsStatus, setSheetsStatus] = useState<string | null>(null);
 
   const handleScrape = async () => {
     if (!query.trim()) {
@@ -75,6 +76,7 @@ export default function Home() {
     setError(null);
     setResults(null);
     setBatchProgress(null);
+    setSheetsStatus(null);
 
     try {
       let response;
@@ -95,6 +97,32 @@ export default function Home() {
       if (response.success && response.data) {
         setResults(response.data);
         setBatchProgress(null);
+
+        // Save to Google Sheets
+        try {
+          const sheetsResponse = await fetch("/api/save-to-sheets", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ leads: response.data }),
+          });
+
+          const sheetsData = await sheetsResponse.json();
+
+          if (sheetsData.success) {
+            setSheetsStatus(
+              `✅ Saved to Google Sheets: ${sheetsData.data.newLeadsAdded} new, ${sheetsData.data.duplicatesSkipped} duplicates skipped`
+            );
+          } else {
+            setSheetsStatus(`⚠️ Google Sheets: ${sheetsData.error}`);
+          }
+        } catch (sheetsError) {
+          console.error("Error saving to Google Sheets:", sheetsError);
+          setSheetsStatus(
+            "⚠️ Failed to save to Google Sheets (check console for details)"
+          );
+        }
       } else {
         setError(response.error || "Failed to scrape businesses");
       }
@@ -382,6 +410,27 @@ export default function Home() {
                 <p className="text-red-700 dark:text-red-300">{error}</p>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Google Sheets Status */}
+        {sheetsStatus && !loading && (
+          <div
+            className={`${
+              sheetsStatus.startsWith("✅")
+                ? "bg-green-50/80 dark:bg-green-900/20 border-green-300 dark:border-green-800"
+                : "bg-yellow-50/80 dark:bg-yellow-900/20 border-yellow-300 dark:border-yellow-800"
+            } backdrop-blur-sm border-2 rounded-2xl p-4 mb-6 shadow-lg`}
+          >
+            <p
+              className={`text-sm font-medium ${
+                sheetsStatus.startsWith("✅")
+                  ? "text-green-700 dark:text-green-300"
+                  : "text-yellow-700 dark:text-yellow-300"
+              }`}
+            >
+              {sheetsStatus}
+            </p>
           </div>
         )}
 
