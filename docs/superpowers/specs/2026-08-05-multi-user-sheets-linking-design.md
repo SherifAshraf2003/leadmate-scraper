@@ -102,7 +102,6 @@ New files:
 | `src/lib/sheetProvisioning.ts` | `provisionSheetForUser(user)` — create, write headers, share, persist |
 | `src/app/api/provision-sheet/route.ts` | Manual retry endpoint when `spreadsheetId` is null |
 | `src/app/api/scrape-token/route.ts` | Session check, then sign a scrape token |
-| `src/middleware.ts` | Redirect signed-out visitors to sign-in |
 | `prisma/schema.prisma` | Models above |
 
 Changed files:
@@ -119,6 +118,11 @@ Changed files:
   `Authorization: Bearer` on each batch. Save after each batch rather than once at the
   end.
 - `src/app/page.tsx` — sign-in gate, a link to the client's sheet, sign-out.
+
+There is deliberately no `middleware.ts`. Auth.js middleware runs on the edge
+runtime, where the Prisma adapter cannot run; the documented workaround is a split
+config. With a single page, the gate belongs in the page itself, and the security
+boundary is the server-side session check in each API route either way.
 
 ### Backend (`leads-scraper-backend`)
 
