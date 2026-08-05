@@ -31,10 +31,11 @@ export async function getUserGoogleClient(
   client.setCredentials({
     access_token: account.access_token,
     refresh_token: account.refresh_token ?? undefined,
-    // 0 (not undefined) when there's no stored expiry: google-auth-library treats a falsy
-    // expiry_date as "not expired" and will skip refreshing, handing back the stale token.
-    // Seeding 0 makes it look already-expired so getAccessToken() below actually refreshes it.
-    expiry_date: account.expires_at ? account.expires_at * 1000 : 0,
+    // 1, not 0 and not undefined: isTokenExpiring() reads
+    // `expiryDate ? expiryDate <= now + threshold : false`, so ANY falsy value
+    // — including 0 — means "never expires" and skips the refresh entirely.
+    // 1 is truthy and safely in the past.
+    expiry_date: account.expires_at ? account.expires_at * 1000 : 1,
   });
 
   let persistTokens: Promise<unknown> | undefined;
