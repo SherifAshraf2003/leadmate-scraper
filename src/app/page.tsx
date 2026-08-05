@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSession, signIn, signOut } from "next-auth/react";
 import {
   scrapeBusinesses,
   scrapeBusinessesBatch,
@@ -65,6 +66,7 @@ export default function Home() {
     null
   );
   const [sheetsStatus, setSheetsStatus] = useState<string | null>(null);
+  const { data: session } = useSession();
 
   const handleScrape = async () => {
     if (!query.trim()) {
@@ -144,6 +146,16 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 py-8 sm:py-16 px-4">
       <div className="max-w-5xl mx-auto">
+        <div className="flex justify-end items-center gap-3 mb-4 text-sm">
+          {session ? (
+            <>
+              <span className="text-gray-600 dark:text-gray-400">{session.user?.email}</span>
+              <button onClick={() => signOut()} className="underline">Sign out</button>
+            </>
+          ) : (
+            <button onClick={() => signIn("google")} className="underline">Sign in with Google</button>
+          )}
+        </div>
         {/* Header */}
         <div className="text-center mb-12">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 dark:bg-blue-500 rounded-2xl mb-6 shadow-lg">
