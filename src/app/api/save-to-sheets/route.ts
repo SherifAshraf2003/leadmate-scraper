@@ -53,18 +53,33 @@ export async function POST(request: NextRequest) {
       // id so it's recoverable, and don't touch the DB until the replacement
       // actually exists: create it first, then swap old id -> new id in one
       // write, never clearing to null as a separate, losable step.
+      const deadSpreadsheetId = spreadsheetId;
       console.warn(
-        `Spreadsheet ${spreadsheetId} not found for user ${user.id}; provisioning a replacement`
+        `Spreadsheet ${deadSpreadsheetId} not found for user ${user.id}; provisioning a replacement`
       );
 
-      const newSpreadsheetId = await createSheetForUser(user);
+      const replacementId = await createSheetForUser(user);
 
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { spreadsheetId: newSpreadsheetId },
+      // Conditional write, mirroring provisionSheetForUser's own race guard:
+      // if a concurrent request already recovered from the same dead id, its
+      // write wins and we converge on its sheet instead of splitting leads
+      // across two orphaned spreadsheets.
+      const swapped = await prisma.user.updateMany({
+        where: { id: user.id, spreadsheetId: deadSpreadsheetId },
+        data: { spreadsheetId: replacementId },
       });
 
-      spreadsheetId = newSpreadsheetId;
+      if (swapped.count === 0) {
+        const winner = await prisma.user.findUnique({
+          where: { id: user.id },
+          select: { spreadsheetId: true },
+        });
+
+        spreadsheetId = winner?.spreadsheetId ?? replacementId;
+      } else {
+        spreadsheetId = replacementId;
+      }
+
       result = await appendLeadsToSheet(leads as BusinessLead[], {
         spreadsheetId,
         auth: authClient,
