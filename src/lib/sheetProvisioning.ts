@@ -61,10 +61,25 @@ export async function provisionSheetForUser(user: {
     },
   });
 
-  await prisma.user.update({
-    where: { id: user.id },
+  // Conditional write: guards against a concurrent caller (createUser event, the retry route,
+  // and Task 4's on-demand path can all race) that read spreadsheetId === null at the same time
+  // and also created a sheet. Only the first writer's id gets stored; the loser's sheet is
+  // orphaned in Drive but the database stays consistent and every caller converges on one id.
+  const updated = await prisma.user.updateMany({
+    where: { id: user.id, spreadsheetId: null },
     data: { spreadsheetId },
   });
+
+  if (updated.count === 0) {
+    const winner = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { spreadsheetId: true },
+    });
+
+    if (winner?.spreadsheetId) {
+      return winner.spreadsheetId;
+    }
+  }
 
   return spreadsheetId;
 }

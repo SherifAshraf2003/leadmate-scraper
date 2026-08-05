@@ -31,11 +31,16 @@ export async function getUserGoogleClient(
   client.setCredentials({
     access_token: account.access_token,
     refresh_token: account.refresh_token ?? undefined,
-    expiry_date: account.expires_at ? account.expires_at * 1000 : undefined,
+    // 0 (not undefined) when there's no stored expiry: google-auth-library treats a falsy
+    // expiry_date as "not expired" and will skip refreshing, handing back the stale token.
+    // Seeding 0 makes it look already-expired so getAccessToken() below actually refreshes it.
+    expiry_date: account.expires_at ? account.expires_at * 1000 : 0,
   });
 
+  let persistTokens: Promise<unknown> | undefined;
+
   client.on("tokens", (tokens) => {
-    void prisma.account
+    persistTokens = prisma.account
       .updateMany({
         where: { userId, provider: "google" },
         data: {
@@ -55,8 +60,13 @@ export async function getUserGoogleClient(
       });
   });
 
+  // 6 minutes: google-auth-library eagerly refreshes internally once a token is within its own
+  // DEFAULT_EAGER_REFRESH_THRESHOLD_MILLIS (5 minutes) of expiry. Our pre-refresh margin has to
+  // fully cover that window, or a call can slip past this check and hit the library's internal
+  // refresh mid-request, surfacing an unwrapped Gaxios/invalid_grant error instead of a
+  // GoogleAuthError with reconnect guidance. 6 minutes gives that a small buffer.
   const expiresSoon =
-    !account.expires_at || account.expires_at * 1000 - Date.now() < 60_000;
+    !account.expires_at || account.expires_at * 1000 - Date.now() < 6 * 60_000;
 
   if (expiresSoon) {
     if (!account.refresh_token) {
@@ -67,6 +77,7 @@ export async function getUserGoogleClient(
 
     try {
       await client.getAccessToken();
+      await persistTokens;
     } catch (error) {
       console.error("Google token refresh failed:", error);
       throw new GoogleAuthError(`Google access could not be renewed. ${RECONNECT}`);
