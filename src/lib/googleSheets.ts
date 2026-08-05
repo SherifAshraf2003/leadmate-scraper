@@ -1,6 +1,7 @@
 import { google } from "googleapis";
 import type { OAuth2Client } from "google-auth-library";
 import { BusinessLead } from "./scraperApi";
+import { LEAD_HEADERS } from "./sheetProvisioning";
 
 /**
  * Creates a unique key for a business lead to identify duplicates
@@ -52,6 +53,7 @@ export async function appendLeadsToSheet(
   totalLeads: number;
   error?: string;
   notFound?: boolean;
+  authFailed?: boolean;
 }> {
   try {
     console.log("🔵 Starting appendLeadsToSheet with", leads.length, "leads");
@@ -61,28 +63,67 @@ export async function appendLeadsToSheet(
     // Get existing data (bounded window for dedupe)
     console.log("🔵 Getting existing data from sheet...");
     const metadata = await sheets.spreadsheets.get({ spreadsheetId });
-    const rowCount =
-      metadata.data.sheets?.find((s) => s.properties?.title === sheetName)
-        ?.properties?.gridProperties?.rowCount ?? 0;
-
-    const firstRow = Math.max(2, rowCount - 4999);
-
-    const existingDataResponse = await sheets.spreadsheets.values.batchGet({
-      spreadsheetId,
-      ranges: [`${sheetName}!A${firstRow}:A`, `${sheetName}!D${firstRow}:D`],
-    });
-
-    const names = existingDataResponse.data.valueRanges?.[0]?.values ?? [];
-    const websites = existingDataResponse.data.valueRanges?.[1]?.values ?? [];
-
-    const existingKeys = new Set(
-      names.map((row, index) =>
-        createLeadKey({
-          name: row?.[0] || undefined,
-          website: websites[index]?.[0] || undefined,
-        })
-      )
+    const sheetMeta = metadata.data.sheets?.find(
+      (s) => s.properties?.title === sheetName
     );
+
+    let existingKeys: Set<string>;
+
+    if (!sheetMeta) {
+      // The tab was renamed or deleted out from under us, but the spreadsheet
+      // itself still exists. Recreate the tab and headers rather than 500ing
+      // forever — provisioning's job, done inline since there's nothing to
+      // dedupe against in a tab that doesn't exist yet.
+      console.log(
+        `⚠️ Sheet tab "${sheetName}" not found — recreating it`
+      );
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{ addSheet: { properties: { title: sheetName } } }],
+        },
+      });
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetName}!A1:E1`,
+        valueInputOption: "RAW",
+        requestBody: { values: [LEAD_HEADERS] },
+      });
+      existingKeys = new Set();
+    } else {
+      const rowCount = sheetMeta.properties?.gridProperties?.rowCount ?? 0;
+      const firstRow = Math.max(2, rowCount - 4999);
+
+      const existingDataResponse = await sheets.spreadsheets.values.batchGet({
+        spreadsheetId,
+        ranges: [
+          `${sheetName}!A${firstRow}:A`,
+          `${sheetName}!B${firstRow}:B`,
+          `${sheetName}!C${firstRow}:C`,
+          `${sheetName}!D${firstRow}:D`,
+        ],
+      });
+
+      const names = existingDataResponse.data.valueRanges?.[0]?.values ?? [];
+      const emails = existingDataResponse.data.valueRanges?.[1]?.values ?? [];
+      const phones = existingDataResponse.data.valueRanges?.[2]?.values ?? [];
+      const websites = existingDataResponse.data.valueRanges?.[3]?.values ?? [];
+
+      existingKeys = new Set(
+        names.map((row, index) =>
+          createLeadKey({
+            name: row?.[0] || undefined,
+            emails: emails[index]?.[0]
+              ? emails[index][0].split(", ").filter(Boolean)
+              : undefined,
+            phones: phones[index]?.[0]
+              ? phones[index][0].split(", ").filter(Boolean)
+              : undefined,
+            website: websites[index]?.[0] || undefined,
+          })
+        )
+      );
+    }
     console.log("🔵 Found", existingKeys.size, "existing keys");
 
     // Filter out duplicates from new leads
@@ -130,11 +171,13 @@ export async function appendLeadsToSheet(
   } catch (error) {
     console.error("Error appending leads to Google Sheets:", error);
 
-    const notFound =
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      (error as { code?: number }).code === 404;
+    const errorCode =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: number }).code
+        : undefined;
+
+    const notFound = errorCode === 404;
+    const authFailed = errorCode === 401 || errorCode === 403;
 
     return {
       success: false,
@@ -142,6 +185,7 @@ export async function appendLeadsToSheet(
       duplicatesSkipped: 0,
       totalLeads: 0,
       notFound,
+      authFailed,
       error:
         error instanceof Error
           ? error.message

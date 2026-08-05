@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { appendLeadsToSheet } from "@/lib/googleSheets";
-import { provisionSheetForUser } from "@/lib/sheetProvisioning";
-import { getUserGoogleClient, GoogleAuthError } from "@/lib/googleClient";
+import {
+  createSheetForUser,
+  provisionSheetForUser,
+} from "@/lib/sheetProvisioning";
+import { getUserGoogleClient, GoogleAuthError, RECONNECT } from "@/lib/googleClient";
 import { BusinessLead } from "@/lib/scraperApi";
 
 export async function POST(request: NextRequest) {
@@ -44,16 +47,35 @@ export async function POST(request: NextRequest) {
     });
 
     if (result.notFound) {
+      // drive.file access can also 404 when the grant is revoked or the file
+      // moves out of the app's view, not only on real deletion — the old
+      // spreadsheet may still hold the user's full history. Log the discarded
+      // id so it's recoverable, and don't touch the DB until the replacement
+      // actually exists: create it first, then swap old id -> new id in one
+      // write, never clearing to null as a separate, losable step.
+      console.warn(
+        `Spreadsheet ${spreadsheetId} not found for user ${user.id}; provisioning a replacement`
+      );
+
+      const newSpreadsheetId = await createSheetForUser(user);
+
       await prisma.user.update({
         where: { id: user.id },
-        data: { spreadsheetId: null },
+        data: { spreadsheetId: newSpreadsheetId },
       });
 
-      spreadsheetId = await provisionSheetForUser(user);
+      spreadsheetId = newSpreadsheetId;
       result = await appendLeadsToSheet(leads as BusinessLead[], {
         spreadsheetId,
         auth: authClient,
       });
+    }
+
+    if (result.authFailed) {
+      return NextResponse.json(
+        { error: `Google access was denied while saving. ${RECONNECT}` },
+        { status: 401 }
+      );
     }
 
     if (!result.success) {

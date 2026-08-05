@@ -4,19 +4,15 @@ import { getUserGoogleClient } from "./googleClient";
 
 export const LEAD_HEADERS = ["Name", "Emails", "Phones", "Website", "Date Added"];
 
-export async function provisionSheetForUser(user: {
+/**
+ * Creates a new spreadsheet with the Leads tab and headers in the user's
+ * Drive. Pure creation only — does not read or write the database, so
+ * callers control exactly when (and whether) the returned id is persisted.
+ */
+export async function createSheetForUser(user: {
   id: string;
   email: string;
 }): Promise<string> {
-  const existing = await prisma.user.findUnique({
-    where: { id: user.id },
-    select: { spreadsheetId: true },
-  });
-
-  if (existing?.spreadsheetId) {
-    return existing.spreadsheetId;
-  }
-
   const authClient = await getUserGoogleClient(user.id);
   const sheets = google.sheets({ version: "v4", auth: authClient });
 
@@ -60,6 +56,24 @@ export async function provisionSheetForUser(user: {
       ],
     },
   });
+
+  return spreadsheetId;
+}
+
+export async function provisionSheetForUser(user: {
+  id: string;
+  email: string;
+}): Promise<string> {
+  const existing = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { spreadsheetId: true },
+  });
+
+  if (existing?.spreadsheetId) {
+    return existing.spreadsheetId;
+  }
+
+  const spreadsheetId = await createSheetForUser(user);
 
   // Conditional write: guards against a concurrent caller (createUser event, the retry route,
   // and Task 4's on-demand path can all race) that read spreadsheetId === null at the same time

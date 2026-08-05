@@ -9,7 +9,8 @@ export class GoogleAuthError extends Error {
   }
 }
 
-const RECONNECT = "Sign out and sign in again to reconnect your Google account.";
+export const RECONNECT =
+  "Sign out and sign in again to reconnect your Google account.";
 
 export async function getUserGoogleClient(
   userId: string
