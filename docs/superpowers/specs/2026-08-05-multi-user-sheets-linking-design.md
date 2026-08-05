@@ -15,8 +15,8 @@ Clients need to run scrapes themselves and have leads land in a sheet of their o
 | Question | Decision |
 |---|---|
 | Audience | A handful of onboarded clients, each running scrapes themselves |
-| Sheet origin | The app creates a sheet per client and shares it with them |
-| Identity | Google Sign-In via Auth.js (basic profile/email scope only) |
+| Sheet origin | The app creates a sheet in each client's own Drive, owned by them |
+| Identity | Google Sign-In via Auth.js, plus the `drive.file` scope |
 | Storage | Postgres on Neon, accessed with Prisma |
 | Access control | Open self-serve — anyone who signs in gets a sheet |
 | Backend coupling | Signed short-lived tokens, not a shared database connection |
@@ -25,24 +25,46 @@ Clients need to run scrapes themselves and have leads land in a sheet of their o
 ### Accepted risk: open self-serve
 
 Any Google account can sign in, receive a provisioned sheet, and consume scraping
-capacity. This costs Render compute and creates Drive files owned by the service
-account. The design keeps a `maxLeads` claim in the scrape token so a per-user cap
+capacity. This costs Render compute, though the Drive files now live in each
+signer's own Drive rather than yours. The design keeps a `maxLeads` claim in the scrape token so a per-user cap
 can be enforced later by changing one value in the token issuer, with no other
 changes.
 
-### Accepted constraint: sheet ownership
+### Revision 2026-08-05: no service account
 
-Sheets are owned by the service account; clients are granted Writer access.
-Ownership cannot transfer to the client without a Google Workspace domain. Clients
-who want their own copy can use File → Make a copy. If the service account key is
-deleted, the sheets go with it.
+The original design used a service account to create and share sheets. Google's
+`iam.disableServiceAccountKeyCreation` organization policy blocks key creation on this
+account, and there is no organization to lift it from — the project has no
+organization at all, so no policy administrator exists to appeal to.
+
+The app therefore acts as each user instead. At sign-in a client grants the
+`drive.file` scope, and the app uses their own credentials to create their
+spreadsheet. This is a better end state than the original:
+
+- Clients own their sheets outright, rather than holding Writer access to a file a
+  robot owns. Ownership no longer depends on a key that could be revoked.
+- `drive.file` grants per-file access to files this app creates and nothing else. It
+  cannot read the rest of a client's Drive.
+- The scope is non-sensitive, so publishing the app needs no Google verification
+  review.
+- Sharing disappears: no `drive.permissions.create`, no `sendNotificationEmail`
+  caveat, no Drive API dependency.
+
+The cost is token lifecycle management — access tokens last about an hour, so the app
+stores refresh tokens and renews them. See "Per-user credentials" below.
+
+### Accepted constraint: consent screen audience
+
+While the OAuth consent screen stays in Testing mode, only accounts listed as test
+users can sign in, capped at 100. Publishing removes the cap and, because `drive.file`
+is non-sensitive, requires no verification review.
 
 ## Architecture
 
 ```
 Browser ──Sign in with Google──▶ Next.js (Vercel) ──▶ Neon Postgres
-   │                                    │
-   │                                    └──service account──▶ Sheets API + Drive API
+   │                                    │                (stores OAuth tokens)
+   │                                    └──as the user──▶ Sheets API
    │
    └──GET /scrape (Bearer token)──▶ Express + Puppeteer (Render)
 ```
@@ -56,14 +78,21 @@ would fail on the first batch.
 Because the browser makes that call itself, the backend must authenticate it without
 holding a shared secret in the browser. Hence signed tokens.
 
-### Two Google identities
+### Per-user credentials
 
-These are distinct and easy to conflate:
+One Google identity now, not two. The OAuth client (`AUTH_GOOGLE_ID` /
+`AUTH_GOOGLE_SECRET`) both proves who the client is and authorizes sheet access.
 
-- **OAuth client** (`AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET`) — proves who the client
-  is. Basic profile and email scope only, so no Google app-verification review.
-- **Service account** (`GOOGLE_SHEETS_CREDENTIALS`) — owns and writes the sheets.
-  Never sees the client's Google credentials.
+Sign-in requests `access_type: "offline"` and `prompt: "consent"`, which is what makes
+Google return a refresh token — it issues one only on first consent unless consent is
+forced. Auth.js's Prisma adapter stores `access_token`, `refresh_token`, and
+`expires_at` on the `Account` row.
+
+`getUserGoogleClient(userId)` loads those, refreshes the access token when it is
+expired or within 60 seconds of expiring, and persists the new values through the
+client's `tokens` event. When no refresh token exists or renewal fails, it throws
+`GoogleAuthError`, which API routes surface as a 401 telling the client to sign in
+again.
 
 ### Data model
 
@@ -84,7 +113,7 @@ model User {
 }
 ```
 
-`spreadsheetId` is nullable deliberately. Provisioning depends on two Google APIs and
+`spreadsheetId` is nullable deliberately. Provisioning depends on a live Google token and
 can fail; a nullable column lets sign-in succeed and the app retry later, rather than
 failing the whole sign-in.
 
@@ -97,20 +126,20 @@ New files:
 | File | Responsibility |
 |---|---|
 | `src/lib/prisma.ts` | Prisma client singleton with a `globalThis` guard |
-| `src/auth.ts` | Auth.js config: Google provider, Prisma adapter, `createUser` event |
+| `src/auth.ts` | Auth.js config: Google provider with `drive.file` + offline access, Prisma adapter, `createUser` event |
+| `src/lib/googleClient.ts` | `getUserGoogleClient(userId)` — per-user OAuth client with token refresh; `GoogleAuthError` |
 | `src/app/api/auth/[...nextauth]/route.ts` | Auth.js route handlers |
-| `src/lib/sheetProvisioning.ts` | `provisionSheetForUser(user)` — create, write headers, share, persist |
+| `src/lib/sheetProvisioning.ts` | `provisionSheetForUser(user)` — create in the user's Drive, write headers, persist |
 | `src/app/api/provision-sheet/route.ts` | Manual retry endpoint when `spreadsheetId` is null |
 | `src/app/api/scrape-token/route.ts` | Session check, then sign a scrape token |
 | `prisma/schema.prisma` | Models above |
 
 Changed files:
 
-- `src/lib/googleSheets.ts` — add the `drive.file` scope to the JWT client. Move
-  header creation out of `ensureSheetExists` into provisioning, since a newly created
-  sheet needs headers exactly once. Narrow the dedupe read (see below).
-  `appendLeadsToSheet` keeps its current signature — it already takes `spreadsheetId`
-  as a parameter, which is why this change stays small.
+- `src/lib/googleSheets.ts` — take the authenticated client from the caller instead of
+  building one from a module-level credential. Move header creation out of
+  `ensureSheetExists` into provisioning, since a newly created sheet needs headers
+  exactly once. Narrow the dedupe read (see below).
 - `src/app/api/save-to-sheets/route.ts` — resolve the spreadsheet from the session
   instead of `process.env.GOOGLE_SHEETS_SPREADSHEET_ID`. Return 401 without a session.
   Provision on demand if `spreadsheetId` is null.
@@ -152,13 +181,17 @@ browser and defeat the mechanism.
 
 1. Client signs in with Google; Auth.js completes the OAuth round trip.
 2. The Prisma adapter inserts a `User` row and Auth.js fires the `createUser` event.
-3. The event calls `provisionSheetForUser`:
-   1. `sheets.spreadsheets.create` — title `Leads — <email>`, one tab named `Leads`
+3. The event calls `provisionSheetForUser`, using the client's own credentials:
+   1. `sheets.spreadsheets.create` — title `Leads — <email>`, one tab named `Leads`.
+      Created in their Drive, owned by them.
    2. `values.update` — write and bold the five headers
-   3. `drive.permissions.create` — role `writer`, type `user`, the client's email,
-      **`sendNotificationEmail: false`** (service accounts cannot send Drive invites
-      without domain-wide delegation, so the app must surface the link itself)
-   4. `UPDATE User SET spreadsheetId = …`
+   3. `UPDATE User SET spreadsheetId = …`
+
+   No sharing step: it is already their file.
+
+   One ordering caveat: on a brand-new user, `createUser` can fire before the `Account`
+   row holding the tokens is written. Provisioning then throws `GoogleAuthError` and
+   falls through to the retry paths below — which is why both of them exist.
 4. The dashboard reads `spreadsheetId` and shows a link to the sheet.
 
 Provisioning runs inside the sign-in callback and must finish within Vercel's 60
@@ -226,7 +259,7 @@ without it every subsequent save fails permanently.
 No automated tests. Manual smoke check after deploy:
 
 1. Sign in with a second Google account.
-2. Confirm the sheet appears in that account's "Shared with me".
+2. Confirm the sheet appears in that account's **My Drive**, owned by them.
 3. Scrape 10 leads; confirm rows land in that sheet.
 4. Scrape the same query again; confirm duplicates are skipped.
 5. Open `/scrape` in a plain browser tab with no token; confirm 401.
@@ -237,8 +270,9 @@ Order matters — the OAuth redirect URI needs the Vercel domain, which does not
 until after the first deploy.
 
 1. Create the Neon project; copy the pooled connection string; run `prisma migrate deploy`.
-2. In Google Cloud: enable the Drive API, and create an OAuth client with a
-   placeholder redirect URI.
+2. In Google Cloud: create an OAuth client with a placeholder redirect URI, request the
+   `drive.file` scope on the consent screen, and add test users (or publish the app —
+   no verification review is needed for a non-sensitive scope).
 3. Generate `AUTH_SECRET` and `SCRAPE_TOKEN_SECRET` with `openssl rand -base64 32`.
 4. Backend: add the auth middleware, CORS allowlist, and `limit` clamp. Deploy to
    Render; copy the service URL.
@@ -252,10 +286,11 @@ until after the first deploy.
 ### Environment variables
 
 **Vercel:** `DATABASE_URL`, `AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`,
-`SCRAPE_TOKEN_SECRET`, `GOOGLE_SHEETS_CREDENTIALS`, `NEXT_PUBLIC_SCRAPER_API_URL`.
+`SCRAPE_TOKEN_SECRET`, `NEXT_PUBLIC_SCRAPER_API_URL`.
 
-`GOOGLE_SHEETS_SPREADSHEET_ID` is removed — it is the single-tenant assumption this
-design replaces.
+`GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, and
+`GOOGLE_SHEETS_CREDENTIALS` are all removed — the first is the single-tenant assumption
+this design replaces, the others belonged to the service account that no longer exists.
 
 **Render:** `SCRAPE_TOKEN_SECRET`, `CORS_ORIGIN`.
 

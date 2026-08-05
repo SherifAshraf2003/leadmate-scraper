@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let each client sign in with Google and have scraped leads saved to a spreadsheet the app creates and shares with them, replacing the single hard-coded sheet.
+**Goal:** Let each client sign in with Google and have scraped leads saved to a spreadsheet the app creates in their own Drive, replacing the single hard-coded sheet.
 
-**Architecture:** Next.js on Vercel gains Auth.js with a Prisma/Neon database; a service account creates and shares one spreadsheet per user at first sign-in. The browser continues to call the Render scraper directly — a scrape takes minutes and Vercel functions are capped at 60 seconds — so that call is authenticated with a short-lived JWT minted by Next.js and verified by Express.
+**Architecture:** Next.js on Vercel gains Auth.js with a Prisma/Neon database. At sign-in each user also grants the `drive.file` scope, and the app acts as that user to create and write their spreadsheet — no service account, because Google policy blocks service account key creation on this account. The browser continues to call the Render scraper directly — a scrape takes minutes and Vercel functions are capped at 60 seconds — so that call is authenticated with a short-lived JWT minted by Next.js and verified by Express.
 
 **Tech Stack:** Next.js 15 (App Router), Auth.js v5 (`next-auth@5`), Prisma, Neon Postgres, `googleapis`, `jsonwebtoken`, Express 4.
 
@@ -15,11 +15,12 @@
 - **No automated tests.** Every task ends with a manual verification step. Do not add a test runner, test files, or test scripts.
 - Two repositories, side by side: `leads-scraper` (frontend) and `leads-scraper-backend` (backend). Paths in each task are relative to the repo named in that task.
 - The frontend repo alias `@/` maps to `src/`.
-- `GOOGLE_SHEETS_SPREADSHEET_ID` is removed by the end of Task 4. No new code may read it.
+- `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, and `GOOGLE_SHEETS_CREDENTIALS` are all removed by the end of Task 4. No new code may read them. There is no service account in this design — Google's `iam.disableServiceAccountKeyCreation` policy blocks key creation on this account and cannot be lifted.
+- Every Google API call is made with the signed-in user's own OAuth credentials, obtained through `getUserGoogleClient(userId)`. Never introduce a shared or application-level credential.
 - `SCRAPE_TOKEN_SECRET` must never be prefixed `NEXT_PUBLIC_`. It is read only in server code (frontend) and in Express (backend).
 - Sheet tab name is `Leads`. Header row is exactly `["Name", "Emails", "Phones", "Website", "Date Added"]` — matches the existing `leadToRow` in `src/lib/googleSheets.ts`.
 - Spreadsheet title format: `Leads — <email>` (em dash).
-- `drive.permissions.create` must always pass `sendNotificationEmail: false`. Service accounts cannot send Drive invitations without domain-wide delegation, and the call fails if it tries.
+- Spreadsheets are created in the user's own Drive and owned by them. There is no sharing step and no Drive API call — `drive.file` grants per-file access to files this app creates.
 - Commit after each task. Commit messages use the `feat:` / `fix:` / `chore:` prefixes already used in both repos.
 - No `middleware.ts`. Auth.js middleware runs on the edge runtime where the Prisma adapter cannot run. The sign-in gate lives in the page; API routes enforce the session server-side.
 
@@ -375,60 +376,208 @@ git commit -m "feat: add Google sign-in with Auth.js and Prisma adapter"
 
 ---
 
-### Task 3: Sheet provisioning
+### Task 2b: Request Drive access at sign-in
 
 **Repo:** `leads-scraper`
 
 **Files:**
+- Modify: `src/auth.ts`
+- Modify: `.env.example`
+
+**Interfaces:**
+- Consumes: the Auth.js config from Task 2.
+- Produces: `Account` rows that carry `access_token`, `refresh_token`, and `expires_at` for the `google` provider — the credentials Task 3 uses to act on a user's behalf.
+
+**Why this task exists:** service account keys are blocked by Google policy on this account with no way to lift it, so the app acts as each user instead of as a robot. That requires asking for Drive permission at sign-in, and asking for it in a way that yields a refresh token.
+
+- [ ] **Step 1: Request the scope and offline access**
+
+In `src/auth.ts`, replace the bare `Google` provider entry with a configured one:
+
+```typescript
+    Google({
+      authorization: {
+        params: {
+          scope:
+            "openid email profile https://www.googleapis.com/auth/drive.file",
+          access_type: "offline",
+          prompt: "consent",
+        },
+      },
+    }),
+```
+
+Three parts, each load-bearing:
+- `drive.file` grants per-file access to files **this app creates**. It cannot see anything else in the user's Drive. It is a non-sensitive scope, so it needs no Google verification review.
+- `access_type: "offline"` is what makes Google return a refresh token at all.
+- `prompt: "consent"` forces the consent screen every time. Google returns a refresh token **only on the first consent** unless you force it; without this, a user who previously signed in gets no refresh token and their access silently dies after an hour.
+
+- [ ] **Step 2: Add yourself as a test user**
+
+The OAuth consent screen is in Testing mode, so only listed accounts can sign in. In Google Cloud Console → APIs & Services → OAuth consent screen → Audience → **Test users** → Add users, add the Google accounts you will test with.
+
+`drive.file` is non-sensitive, so the app can later be published without a review — but until it is, unlisted accounts get `Error 403: access_denied`.
+
+- [ ] **Step 3: Force a fresh consent**
+
+Existing `Account` rows predate the new scope and hold no refresh token. Delete them so the next sign-in re-consents:
+
+```bash
+set -a && source .env.local && set +a && npx prisma studio
+```
+
+Delete every row in `Account` and `Session` (leave `User` — its `spreadsheetId` is still valid). Close Studio with Ctrl-C.
+
+- [ ] **Step 4: Verify the build and the provider config**
+
+```bash
+npx tsc --noEmit && npx next build
+```
+
+Expected: both pass.
+
+```bash
+npm run dev
+```
+
+Then:
+
+```bash
+curl -s http://localhost:3000/api/auth/providers
+```
+
+Expected: JSON listing the `google` provider. Kill the dev server.
+
+- [ ] **Step 5: Verify the tokens land (needs a browser)**
+
+Sign in at http://localhost:3000. The consent screen now asks for Drive access — accept it. Then open Prisma Studio and confirm the `Account` row has a non-null `refresh_token` and a non-null `expires_at`.
+
+This is the gate for Task 3: without a refresh token, provisioning works for one hour and then fails.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/auth.ts .env.example
+git commit -m "feat: request drive.file scope and offline access at sign-in"
+```
+
+---
+
+### Task 3: Per-user Google client and sheet provisioning
+
+**Repo:** `leads-scraper`
+
+**Files:**
+- Create: `src/lib/googleClient.ts`
 - Create: `src/lib/sheetProvisioning.ts`
 - Create: `src/app/api/provision-sheet/route.ts`
 - Modify: `src/auth.ts`
 
 **Interfaces:**
-- Consumes: `prisma` from `@/lib/prisma`; `auth` from `@/auth`.
+- Consumes: `prisma` from `@/lib/prisma`; `auth` from `@/auth`; `Account` rows from Task 2b.
 - Produces:
-  - `provisionSheetForUser(user: { id: string; email: string }): Promise<string>` — returns the spreadsheet id, creating and sharing the sheet only if the user has none. Idempotent.
+  - `getUserGoogleClient(userId: string): Promise<OAuth2Client>` — an authenticated client for that user, refreshing the access token when needed.
+  - `GoogleAuthError` — thrown when a user's Google access cannot be restored without signing in again.
+  - `provisionSheetForUser(user: { id: string; email: string }): Promise<string>` — returns the spreadsheet id, creating one only if the user has none. Idempotent.
   - `LEAD_HEADERS: string[]` — the header row, re-used by Task 4.
-  - `getGoogleAuthClient(): JWT` — service account client carrying both the Sheets and Drive scopes.
   - `POST /api/provision-sheet` → `{ spreadsheetId }` or `{ error }`.
 
-- [ ] **Step 1: Enable the Drive API**
+- [ ] **Step 1: Write the per-user Google client**
 
-In https://console.cloud.google.com → APIs & Services → Library → search "Google Drive API" → Enable, on the same project as the service account.
-
-Creating a spreadsheet needs only the Sheets scope, but sharing it with the client needs Drive. Without this the provisioning call fails at the sharing step with a 403.
-
-- [ ] **Step 2: Write the provisioning module**
-
-Create `src/lib/sheetProvisioning.ts`. The order of operations matters: the database write is last, so a mid-way failure leaves an orphaned empty sheet rather than a stored id pointing at a sheet the client cannot open.
+Create `src/lib/googleClient.ts`. Access tokens last about an hour, so anything long-lived must refresh them; the `tokens` event fires on refresh and is where the new values get persisted.
 
 ```typescript
 import { google } from "googleapis";
-import { JWT } from "google-auth-library";
+import type { OAuth2Client } from "google-auth-library";
 import { prisma } from "./prisma";
 
-export const LEAD_HEADERS = ["Name", "Emails", "Phones", "Website", "Date Added"];
+export class GoogleAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GoogleAuthError";
+  }
+}
 
-const SCOPES = [
-  "https://www.googleapis.com/auth/spreadsheets",
-  "https://www.googleapis.com/auth/drive.file",
-];
+const RECONNECT = "Sign out and sign in again to reconnect your Google account.";
 
-export function getGoogleAuthClient(): JWT {
-  const raw = process.env.GOOGLE_SHEETS_CREDENTIALS;
+export async function getUserGoogleClient(
+  userId: string
+): Promise<OAuth2Client> {
+  const account = await prisma.account.findFirst({
+    where: { userId, provider: "google" },
+    select: { access_token: true, refresh_token: true, expires_at: true },
+  });
 
-  if (!raw) {
-    throw new Error("GOOGLE_SHEETS_CREDENTIALS environment variable is not set");
+  if (!account?.access_token) {
+    throw new GoogleAuthError(`No Google account is linked. ${RECONNECT}`);
   }
 
-  const credentials = JSON.parse(raw);
+  const client = new google.auth.OAuth2(
+    process.env.AUTH_GOOGLE_ID,
+    process.env.AUTH_GOOGLE_SECRET
+  );
 
-  return new JWT({
-    email: credentials.client_email,
-    key: credentials.private_key,
-    scopes: SCOPES,
+  client.setCredentials({
+    access_token: account.access_token,
+    refresh_token: account.refresh_token ?? undefined,
+    expiry_date: account.expires_at ? account.expires_at * 1000 : undefined,
   });
+
+  client.on("tokens", (tokens) => {
+    void prisma.account
+      .updateMany({
+        where: { userId, provider: "google" },
+        data: {
+          ...(tokens.access_token
+            ? { access_token: tokens.access_token }
+            : {}),
+          ...(tokens.refresh_token
+            ? { refresh_token: tokens.refresh_token }
+            : {}),
+          ...(tokens.expiry_date
+            ? { expires_at: Math.floor(tokens.expiry_date / 1000) }
+            : {}),
+        },
+      })
+      .catch((error) => {
+        console.error("Failed to persist refreshed Google tokens:", error);
+      });
+  });
+
+  const expiresSoon =
+    !account.expires_at || account.expires_at * 1000 - Date.now() < 60_000;
+
+  if (expiresSoon) {
+    if (!account.refresh_token) {
+      throw new GoogleAuthError(
+        `Google access expired and no refresh token is stored. ${RECONNECT}`
+      );
+    }
+
+    try {
+      await client.getAccessToken();
+    } catch (error) {
+      console.error("Google token refresh failed:", error);
+      throw new GoogleAuthError(`Google access could not be renewed. ${RECONNECT}`);
+    }
+  }
+
+  return client;
 }
+```
+
+`getAccessToken()` refreshes automatically when the stored token is expired, which is why there is no manual refresh call. The 60-second margin avoids handing out a token that expires mid-request.
+
+- [ ] **Step 2: Write the provisioning module**
+
+Create `src/lib/sheetProvisioning.ts`. The spreadsheet is created with the user's own credentials, so it lands in their Drive owned by them — there is no sharing step and no Drive API call.
+
+```typescript
+import { google } from "googleapis";
+import { prisma } from "./prisma";
+import { getUserGoogleClient } from "./googleClient";
+
+export const LEAD_HEADERS = ["Name", "Emails", "Phones", "Website", "Date Added"];
 
 export async function provisionSheetForUser(user: {
   id: string;
@@ -443,9 +592,8 @@ export async function provisionSheetForUser(user: {
     return existing.spreadsheetId;
   }
 
-  const authClient = getGoogleAuthClient();
+  const authClient = await getUserGoogleClient(user.id);
   const sheets = google.sheets({ version: "v4", auth: authClient });
-  const drive = google.drive({ version: "v3", auth: authClient });
 
   const created = await sheets.spreadsheets.create({
     requestBody: {
@@ -488,16 +636,6 @@ export async function provisionSheetForUser(user: {
     },
   });
 
-  await drive.permissions.create({
-    fileId: spreadsheetId,
-    sendNotificationEmail: false,
-    requestBody: {
-      role: "writer",
-      type: "user",
-      emailAddress: user.email,
-    },
-  });
-
   await prisma.user.update({
     where: { id: user.id },
     data: { spreadsheetId },
@@ -506,6 +644,8 @@ export async function provisionSheetForUser(user: {
   return spreadsheetId;
 }
 ```
+
+The database write is last on purpose: a failure partway through leaves an orphaned empty sheet in the user's Drive rather than a stored id pointing at something unusable.
 
 - [ ] **Step 3: Provision on first sign-in**
 
@@ -531,16 +671,19 @@ and add an `events` block alongside the existing `callbacks`:
   },
 ```
 
-The `try`/`catch` is deliberate. A throw here would fail the whole sign-in over a transient Google API error; instead the user gets an account with a null `spreadsheetId` and recovers through the retry endpoint below.
+The `try`/`catch` is deliberate: a throw here would fail the whole sign-in over a transient Google error. Instead the user gets an account with a null `spreadsheetId` and recovers through the retry endpoint below.
+
+**Known ordering caveat, do not try to fix it here:** on a brand-new user, `createUser` may fire before the `Account` row holding the tokens is written, in which case `getUserGoogleClient` throws `GoogleAuthError` and provisioning is deferred to the retry path. That is why the retry endpoint and the on-demand provisioning in Task 4 both exist. Log it and move on.
 
 - [ ] **Step 4: Add the retry endpoint**
 
-Create `src/app/api/provision-sheet/route.ts`. `createUser` fires exactly once per user, so this is how a user whose provisioning failed gets a sheet.
+Create `src/app/api/provision-sheet/route.ts`:
 
 ```typescript
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { provisionSheetForUser } from "@/lib/sheetProvisioning";
+import { GoogleAuthError } from "@/lib/googleClient";
 
 export async function POST() {
   const session = await auth();
@@ -559,6 +702,10 @@ export async function POST() {
   } catch (error) {
     console.error("Provisioning failed:", error);
 
+    if (error instanceof GoogleAuthError) {
+      return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+
     return NextResponse.json(
       {
         error:
@@ -570,48 +717,35 @@ export async function POST() {
 }
 ```
 
-- [ ] **Step 5: Verify with a fresh account**
-
-Delete your existing rows so `createUser` fires again:
+- [ ] **Step 5: Verify the build**
 
 ```bash
-npx prisma studio
+npx tsc --noEmit && npx next build
 ```
 
-Delete your row in `User` (the `Account` and `Session` rows cascade). Then:
+Expected: both pass.
 
-```bash
-npm run dev
-```
+- [ ] **Step 6: Verify provisioning (needs a browser)**
 
-Sign in again. Expected, in order:
-1. Prisma Studio shows your `User` row with a populated `spreadsheetId`.
-2. https://drive.google.com → "Shared with me" shows `Leads — <your email>`.
-3. Opening it shows a bolded, grey header row: Name, Emails, Phones, Website, Date Added.
+Delete your `User` row in Prisma Studio so `createUser` fires again, then sign in at http://localhost:3000 and accept the Drive permission.
 
-Note there is no email notification — `sendNotificationEmail: false` — so the file appears silently.
-
-- [ ] **Step 6: Verify idempotency**
-
-With the dev server running and signed in:
-
-```bash
-curl -X POST http://localhost:3000/api/provision-sheet -H "Cookie: $(echo $COOKIE)"
-```
-
-Easier without shell cookie juggling: open the browser devtools console on http://localhost:3000 and run:
+Then, in the browser devtools console on http://localhost:3000:
 
 ```javascript
 await (await fetch("/api/provision-sheet", { method: "POST" })).json()
 ```
 
-Expected: returns the **same** `spreadsheetId` already in the database, and no second sheet appears in Drive.
+Expected, in order:
+1. Returns `{ spreadsheetId: "..." }`.
+2. https://drive.google.com — **My Drive**, not "Shared with me" — contains `Leads — <your email>`, owned by you.
+3. The sheet has a bolded, grey header row: Name, Emails, Phones, Website, Date Added.
+4. Running the same call again returns the **same** id and creates no second sheet.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/lib/sheetProvisioning.ts src/app/api/provision-sheet src/auth.ts
-git commit -m "feat: provision a shared Google Sheet per user at sign-in"
+git add src/lib/googleClient.ts src/lib/sheetProvisioning.ts src/app/api/provision-sheet src/auth.ts
+git commit -m "feat: provision each user a spreadsheet in their own Drive"
 ```
 
 ---
@@ -626,27 +760,45 @@ git commit -m "feat: provision a shared Google Sheet per user at sign-in"
 - Modify: `.env.example`
 
 **Interfaces:**
-- Consumes: `provisionSheetForUser`, `getGoogleAuthClient` from `@/lib/sheetProvisioning`; `auth` from `@/auth`; `prisma` from `@/lib/prisma`.
-- Produces: `appendLeadsToSheet(leads: BusinessLead[], config: { spreadsheetId: string; sheetName?: string }): Promise<{ success: boolean; newLeadsAdded: number; duplicatesSkipped: number; totalLeads: number; error?: string; notFound?: boolean }>` — same shape as today plus `notFound`, set when the spreadsheet is gone.
+- Consumes: `getUserGoogleClient`, `GoogleAuthError` from `@/lib/googleClient`; `provisionSheetForUser` from `@/lib/sheetProvisioning`; `auth` from `@/auth`; `prisma` from `@/lib/prisma`.
+- Produces: `appendLeadsToSheet(leads: BusinessLead[], config: { spreadsheetId: string; auth: OAuth2Client; sheetName?: string }): Promise<{ success: boolean; newLeadsAdded: number; duplicatesSkipped: number; totalLeads: number; error?: string; notFound?: boolean }>` — the config now carries the caller's authenticated client, and `notFound` is set when the spreadsheet is gone.
 
-- [ ] **Step 1: Simplify and narrow the sheet writer**
+- [ ] **Step 1: Take the auth client from the caller**
 
 In `src/lib/googleSheets.ts`:
 
-Replace the local `getGoogleSheetsClient` definition with the shared client, and delete the now-unused `JWT` and `google.auth` imports:
+Replace the imports and the local `getGoogleSheetsClient` with:
 
 ```typescript
 import { google } from "googleapis";
+import type { OAuth2Client } from "google-auth-library";
 import { BusinessLead } from "./scraperApi";
-import { getGoogleAuthClient } from "./sheetProvisioning";
-
-const getGoogleSheetsClient = () =>
-  google.sheets({ version: "v4", auth: getGoogleAuthClient() });
 ```
 
-Delete the entire `ensureSheetExists` function and its call inside `appendLeadsToSheet`. Provisioning now guarantees the tab and headers exist, so re-checking on every save costs two API calls for nothing.
+Delete the `GoogleSheetsConfig` interface's old shape and replace it with:
 
-Replace the existing-data block inside `appendLeadsToSheet` — the `values.get` on `${sheetName}!A2:E` and the `rowToLead` mapping — with a two-column, bounded read. `createLeadKey` only reads name and website, so pulling phones and timestamps is wasted bandwidth:
+```typescript
+export interface GoogleSheetsConfig {
+  spreadsheetId: string;
+  auth: OAuth2Client;
+  sheetName?: string;
+}
+```
+
+Inside `appendLeadsToSheet`, replace the `const sheets = getGoogleSheetsClient();` line and the destructuring below it with:
+
+```typescript
+    const { spreadsheetId, auth, sheetName = "Leads" } = config;
+    const sheets = google.sheets({ version: "v4", auth });
+```
+
+There is no module-level credential any more — every call is made as the user who owns the sheet.
+
+Delete the entire `ensureSheetExists` function and its call. Provisioning guarantees the tab and headers exist, so re-checking on every save costs two API calls for nothing.
+
+- [ ] **Step 2: Narrow the dedupe read**
+
+Replace the existing-data block inside `appendLeadsToSheet` — the `values.get` on `${sheetName}!A2:E` and the `rowToLead` mapping — with a two-column, bounded read. `createLeadKey` reads only name and website, so fetching phones and timestamps is wasted bandwidth:
 
 ```typescript
     const metadata = await sheets.spreadsheets.get({ spreadsheetId });
@@ -658,10 +810,7 @@ Replace the existing-data block inside `appendLeadsToSheet` — the `values.get`
 
     const existingDataResponse = await sheets.spreadsheets.values.batchGet({
       spreadsheetId,
-      ranges: [
-        `${sheetName}!A${firstRow}:A`,
-        `${sheetName}!D${firstRow}:D`,
-      ],
+      ranges: [`${sheetName}!A${firstRow}:A`, `${sheetName}!D${firstRow}:D`],
     });
 
     const names = existingDataResponse.data.valueRanges?.[0]?.values ?? [];
@@ -677,17 +826,17 @@ Replace the existing-data block inside `appendLeadsToSheet` — the `values.get`
     );
 ```
 
-`rowCount` is the grid height rather than the filled-row count, so this is an upper bound on the dedupe window — it may read fewer than 5,000 populated rows but never more than the sheet holds. That is the intent: bound the read, not count precisely.
+`rowCount` is the grid height rather than the filled-row count, so this is an upper bound on the dedupe window — it may read fewer than 5,000 populated rows, never more than the sheet holds. Bounding the read is the point; exact counting is not.
 
-Delete the `rowToLead` function — nothing calls it now.
-
-The `uniqueNewLeads` filter below this block already uses `existingKeys` and needs no change. Replace the `totalLeads` calculation, which referenced the deleted `existingLeads`:
+Delete the `rowToLead` function — nothing calls it now. Replace the `totalLeads` calculation, which referenced the deleted `existingLeads`:
 
 ```typescript
     const totalLeads = existingKeys.size + uniqueNewLeads.length;
 ```
 
-- [ ] **Step 2: Report a deleted spreadsheet distinctly**
+The `uniqueNewLeads` filter between these blocks already uses `existingKeys` and needs no change.
+
+- [ ] **Step 3: Report a deleted spreadsheet distinctly**
 
 In the `catch` block of `appendLeadsToSheet`, before the existing return, detect a 404 so the caller can reprovision:
 
@@ -713,7 +862,7 @@ In the `catch` block of `appendLeadsToSheet`, before the existing return, detect
 
 Add `notFound?: boolean;` to the function's declared return type.
 
-- [ ] **Step 3: Resolve the sheet from the session**
+- [ ] **Step 4: Resolve the sheet and the credentials from the session**
 
 Replace the whole body of `src/app/api/save-to-sheets/route.ts`:
 
@@ -723,6 +872,7 @@ import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { appendLeadsToSheet } from "@/lib/googleSheets";
 import { provisionSheetForUser } from "@/lib/sheetProvisioning";
+import { getUserGoogleClient, GoogleAuthError } from "@/lib/googleClient";
 import { BusinessLead } from "@/lib/scraperApi";
 
 export async function POST(request: NextRequest) {
@@ -755,8 +905,11 @@ export async function POST(request: NextRequest) {
       spreadsheetId = await provisionSheetForUser(user);
     }
 
+    const authClient = await getUserGoogleClient(user.id);
+
     let result = await appendLeadsToSheet(leads as BusinessLead[], {
       spreadsheetId,
+      auth: authClient,
     });
 
     if (result.notFound) {
@@ -768,6 +921,7 @@ export async function POST(request: NextRequest) {
       spreadsheetId = await provisionSheetForUser(user);
       result = await appendLeadsToSheet(leads as BusinessLead[], {
         spreadsheetId,
+        auth: authClient,
       });
     }
 
@@ -791,6 +945,10 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Error in save-to-sheets API:", error);
 
+    if (error instanceof GoogleAuthError) {
+      return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+
     return NextResponse.json(
       {
         error:
@@ -804,21 +962,29 @@ export async function POST(request: NextRequest) {
 }
 ```
 
-The reprovision-on-404 path matters: clients delete sheets, and without it every later save fails permanently.
+The reprovision-on-404 path matters more than it looks: users delete sheets, and without it every later save fails permanently.
 
-- [ ] **Step 4: Remove the single-tenant variable**
+- [ ] **Step 5: Remove the dead service account variables**
 
-Delete the `GOOGLE_SHEETS_SPREADSHEET_ID` lines from `.env.example` and from `.env.local`. Confirm nothing references it:
+The service account is gone from the design — Google policy blocks creating keys for it. Delete `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, and `GOOGLE_SHEETS_CREDENTIALS`, and their comment blocks, from `.env.example` and from `.env.local`. Confirm nothing references them:
 
 ```bash
-grep -rn "GOOGLE_SHEETS_SPREADSHEET_ID" src/ .env.example
+grep -rn "GOOGLE_SHEETS_SPREADSHEET_ID\|GOOGLE_SHEETS_CREDENTIALS\|GOOGLE_SHEETS_SHEET_NAME" src/ .env.example
 ```
 
 Expected: no output.
 
-- [ ] **Step 5: Verify saving, deduping, and recovery**
+- [ ] **Step 6: Verify the build**
 
-With `npm run dev` running and signed in, open the devtools console on http://localhost:3000:
+```bash
+npx tsc --noEmit && npx next build
+```
+
+Expected: both pass.
+
+- [ ] **Step 7: Verify saving, deduping, and recovery (needs a browser)**
+
+Signed in at http://localhost:3000, in the devtools console:
 
 ```javascript
 await (await fetch("/api/save-to-sheets", {
@@ -828,15 +994,15 @@ await (await fetch("/api/save-to-sheets", {
 })).json()
 ```
 
-Expected: `newLeadsAdded: 1`. Check the sheet — one row.
+Expected: `newLeadsAdded: 1`, and one row in the sheet.
 
-Run the exact same call again. Expected: `newLeadsAdded: 0, duplicatesSkipped: 1`, and still one row in the sheet.
+Run the identical call again. Expected: `newLeadsAdded: 0, duplicatesSkipped: 1`, still one row.
 
-Now delete the spreadsheet in Google Drive (and empty the trash), then run the call once more. Expected: it succeeds, a new `Leads — <email>` sheet appears in Drive, and `spreadsheetId` in Prisma Studio has changed.
+Delete the spreadsheet in Drive and empty the trash, then run it once more. Expected: it succeeds, a new `Leads — <email>` appears in your Drive, and `spreadsheetId` in Prisma Studio has changed.
 
-Finally, sign out and run the call again. Expected: `{"error":"Unauthorized"}`.
+Sign out and run it again. Expected: `{"error":"Unauthorized"}`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/lib/googleSheets.ts src/app/api/save-to-sheets/route.ts .env.example
@@ -1476,7 +1642,7 @@ With both dev servers running (`npm run dev` in each repo), open http://localhos
 
 1. Signed out → the gate, no scrape UI.
 2. Sign in with a second Google account → the app appears.
-3. Check Drive with that account → `Leads — <that email>` under "Shared with me".
+3. Check that account's **My Drive** → `Leads — <that email>`, owned by them.
 4. Scrape `calgary dentists` with Number of Leads = 5. Expected: results appear, status says leads were saved, "Your leads sheet →" links to a sheet containing them.
 5. Scrape the same query again. Expected: duplicates skipped, no new rows.
 6. Sign out, sign back in with your **first** account, scrape. Expected: rows land in the first account's sheet, and the second account's sheet is untouched.
@@ -1537,12 +1703,11 @@ In the Vercel project, set:
 - `AUTH_SECRET`
 - `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`
 - `SCRAPE_TOKEN_SECRET` — identical to the backend's
-- `GOOGLE_SHEETS_CREDENTIALS` — the service account JSON on one line
 - `NEXT_PUBLIC_SCRAPER_API_URL` — the Render URL from step 2
 
-Confirm `GOOGLE_SHEETS_SPREADSHEET_ID` is **not** present. Deploy, and copy the resulting domain.
+Confirm none of `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, or `GOOGLE_SHEETS_CREDENTIALS` is present — this design has no service account. Deploy, and copy the resulting domain.
 
-- [ ] **Step 4: Add the production redirect URI**
+- [ ] **Step 4: Add the production redirect URI and publish the consent screen**
 
 In Google Cloud Console → Credentials → your OAuth client → Authorized redirect URIs, add:
 
@@ -1551,6 +1716,8 @@ https://<your-vercel-domain>/api/auth/callback/google
 ```
 
 Sign-in fails with `redirect_uri_mismatch` until this is saved.
+
+Then decide the consent screen's audience. While it stays in **Testing**, only accounts listed under Test users can sign in — everyone else gets `Error 403: access_denied`, capped at 100 users. Because `drive.file` is a non-sensitive scope, **Publish app** requires no Google verification review. Publish it if real clients will sign in; leave it in Testing while only you and your test accounts use it.
 
 - [ ] **Step 5: Point CORS at the real domain**
 
@@ -1561,7 +1728,7 @@ In Render, set `CORS_ORIGIN` to `https://<your-vercel-domain>` and redeploy the 
 From the spec, against the live domain:
 
 1. Sign in with a second Google account.
-2. The sheet appears in that account's "Shared with me".
+2. The sheet appears in that account's **My Drive**, owned by them.
 3. Scrape 10 leads; rows land in that sheet.
 4. Scrape the same query again; duplicates are skipped.
 5. `curl` the Render `/scrape` URL with no token; expect `401`.
