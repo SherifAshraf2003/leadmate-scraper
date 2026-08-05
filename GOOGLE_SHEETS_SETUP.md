@@ -1,6 +1,6 @@
 # Google Sheets Integration Setup Guide
 
-This guide will walk you through setting up Google Sheets integration for your LeadMate Scraper application.
+This guide will walk you through setting up Google Sheets integration for your Leads Scraper application.
 
 ## Prerequisites
 
@@ -12,7 +12,7 @@ This guide will walk you through setting up Google Sheets integration for your L
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/)
 2. Click on "Select a project" at the top
 3. Click "New Project"
-4. Enter a project name (e.g., "LeadMate Scraper")
+4. Enter a project name (e.g., "Leads Scraper")
 5. Click "Create"
 
 ## Step 2: Enable Google Sheets API
@@ -26,7 +26,7 @@ This guide will walk you through setting up Google Sheets integration for your L
 
 1. Go to "APIs & Services" > "Credentials"
 2. Click "Create Credentials" > "Service Account"
-3. Enter a service account name (e.g., "leadmate-sheets-service")
+3. Enter a service account name (e.g., "leads-sheets-service")
 4. Click "Create and Continue"
 5. Skip the optional steps and click "Done"
 
@@ -43,7 +43,7 @@ This guide will walk you through setting up Google Sheets integration for your L
 ## Step 5: Share Your Google Sheet with the Service Account
 
 1. Open the downloaded JSON file and find the `client_email` field
-2. Copy the email address (it looks like: `leadmate-sheets-service@your-project.iam.gserviceaccount.com`)
+2. Copy the email address (it looks like: `leads-sheets-service@your-project.iam.gserviceaccount.com`)
 3. Open your Google Sheets spreadsheet
 4. Click "Share" in the top right
 5. Paste the service account email

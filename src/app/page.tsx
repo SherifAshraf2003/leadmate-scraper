@@ -162,7 +162,7 @@ export default function Home() {
             </svg>
           </div>
           <h1 className="text-5xl sm:text-6xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 dark:from-blue-400 dark:to-purple-400 bg-clip-text text-transparent mb-4">
-            LeadMate Scraper
+            Leads Scraper
           </h1>
           <p className="text-lg text-gray-600 dark:text-gray-400 max-w-2xl mx-auto">
             Extract business leads from the web with ease
@@ -535,11 +535,11 @@ export default function Home() {
                         ⚠️ No Phone Numbers Found
                       </h3>
                       <p className="text-sm text-amber-700 dark:text-amber-300">
-                        The scraper didn't find any phone numbers in the
-                        results. This might be because the backend API isn't
-                        returning phone data, or the websites don't have visible
-                        phone numbers. Check the raw JSON below to see what data
-                        was returned.
+                        The scraper didn&apos;t find any phone numbers in the
+                        results. This might be because the backend API
+                        isn&apos;t returning phone data, or the websites
+                        don&apos;t have visible phone numbers. Check the raw
+                        JSON below to see what data was returned.
                       </p>
                     </div>
                   </div>

@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "LeadMate Scraper - Web Lead Generation",
+  title: "Leads Scraper - Web Lead Generation",
   description:
     "Extract business leads from the web including emails, phone numbers, and websites",
 };

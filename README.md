@@ -1,4 +1,4 @@
-# 🎯 LeadMate Scraper - Frontend
+# 🎯 Leads Scraper - Frontend
 
 <div align="center">
 
@@ -53,14 +53,14 @@
 
 ```bash
 # 1. Clone and set up the BACKEND first
-git clone https://github.com/SherifAshraf2003/Leadmate-scraper-backend.git
-cd Leadmate-scraper-backend
+git clone https://github.com/SherifAshraf2003/leads-scraper-backend.git
+cd leads-scraper-backend
 npm install
 npm run dev
 
 # 2. In a NEW terminal, clone and set up the FRONTEND
-git clone https://github.com/SherifAshraf2003/leadmate-scraper.git
-cd leadmate-scraper
+git clone https://github.com/SherifAshraf2003/leads-scraper.git
+cd leads-scraper
 npm install
 
 # 3. Create your environment file
@@ -143,13 +143,13 @@ The backend handles all the web scraping. **You must set it up first!**
 #### 1.1 Clone the Backend Repository
 
 ```bash
-git clone https://github.com/SherifAshraf2003/Leadmate-scraper-backend.git
+git clone https://github.com/SherifAshraf2003/leads-scraper-backend.git
 ```
 
 #### 1.2 Navigate to the Backend Folder
 
 ```bash
-cd Leadmate-scraper-backend
+cd leads-scraper-backend
 ```
 
 #### 1.3 Install Backend Dependencies
@@ -181,13 +181,13 @@ Open a **new terminal window** (don't close the backend terminal!)
 #### 2.1 Clone the Frontend Repository
 
 ```bash
-git clone https://github.com/SherifAshraf2003/leadmate-scraper.git
+git clone https://github.com/SherifAshraf2003/leads-scraper.git
 ```
 
 #### 2.2 Navigate to the Frontend Folder
 
 ```bash
-cd leadmate-scraper
+cd leads-scraper
 ```
 
 #### 2.3 Install Frontend Dependencies
@@ -310,7 +310,7 @@ Want leads automatically saved to a Google Sheet? See the detailed guide:
 ## 📁 Project Structure
 
 ```
-leadmate-scraper/
+leads-scraper/
 ├── 📁 src/
 │   ├── 📁 app/
 │   │   ├── 📁 api/

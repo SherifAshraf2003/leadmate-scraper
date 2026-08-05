@@ -2,7 +2,7 @@
 
 ## Overview
 
-The LeadMate Scraper now supports batch fetching with automatic pagination and rate limiting to help you collect larger amounts of leads safely and efficiently.
+The Leads Scraper now supports batch fetching with automatic pagination and rate limiting to help you collect larger amounts of leads safely and efficiently.
 
 ## Features
 
