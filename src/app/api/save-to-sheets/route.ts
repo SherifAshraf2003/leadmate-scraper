@@ -1,9 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/prisma";
 import { appendLeadsToSheet } from "@/lib/googleSheets";
+import { provisionSheetForUser } from "@/lib/sheetProvisioning";
+import { getUserGoogleClient, GoogleAuthError } from "@/lib/googleClient";
 import { BusinessLead } from "@/lib/scraperApi";
 
 export async function POST(request: NextRequest) {
   try {
+    const session = await auth();
+
+    if (!session?.user?.id || !session.user.email) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { leads } = await request.json();
 
     if (!leads || !Array.isArray(leads)) {
@@ -13,22 +23,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+    const user = { id: session.user.id, email: session.user.email };
+
+    let spreadsheetId = (
+      await prisma.user.findUnique({
+        where: { id: user.id },
+        select: { spreadsheetId: true },
+      })
+    )?.spreadsheetId;
 
     if (!spreadsheetId) {
-      return NextResponse.json(
-        {
-          error:
-            "Google Sheets is not configured. Please set GOOGLE_SHEETS_SPREADSHEET_ID environment variable.",
-        },
-        { status: 500 }
-      );
+      spreadsheetId = await provisionSheetForUser(user);
     }
 
-    const result = await appendLeadsToSheet(leads as BusinessLead[], {
+    const authClient = await getUserGoogleClient(user.id);
+
+    let result = await appendLeadsToSheet(leads as BusinessLead[], {
       spreadsheetId,
-      sheetName: process.env.GOOGLE_SHEETS_SHEET_NAME || "Leads",
+      auth: authClient,
     });
+
+    if (result.notFound) {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { spreadsheetId: null },
+      });
+
+      spreadsheetId = await provisionSheetForUser(user);
+      result = await appendLeadsToSheet(leads as BusinessLead[], {
+        spreadsheetId,
+        auth: authClient,
+      });
+    }
 
     if (!result.success) {
       return NextResponse.json(
@@ -44,10 +70,16 @@ export async function POST(request: NextRequest) {
         newLeadsAdded: result.newLeadsAdded,
         duplicatesSkipped: result.duplicatesSkipped,
         totalLeads: result.totalLeads,
+        spreadsheetId,
       },
     });
   } catch (error) {
     console.error("Error in save-to-sheets API:", error);
+
+    if (error instanceof GoogleAuthError) {
+      return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+
     return NextResponse.json(
       {
         error:

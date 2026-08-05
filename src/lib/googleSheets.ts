@@ -1,27 +1,6 @@
 import { google } from "googleapis";
-import { JWT } from "google-auth-library";
+import type { OAuth2Client } from "google-auth-library";
 import { BusinessLead } from "./scraperApi";
-
-// Initialize Google Sheets API
-const getGoogleSheetsClient = () => {
-  const credentials = process.env.GOOGLE_SHEETS_CREDENTIALS;
-
-  if (!credentials) {
-    throw new Error(
-      "GOOGLE_SHEETS_CREDENTIALS environment variable is not set"
-    );
-  }
-
-  const credentialsObj = JSON.parse(credentials);
-
-  const auth = new JWT({
-    email: credentialsObj.client_email,
-    key: credentialsObj.private_key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-
-  return google.sheets({ version: "v4", auth });
-};
 
 /**
  * Creates a unique key for a business lead to identify duplicates
@@ -51,20 +30,9 @@ const leadToRow = (lead: BusinessLead): string[] => {
   ];
 };
 
-/**
- * Converts a row array back to a BusinessLead object
- */
-const rowToLead = (row: string[]): BusinessLead => {
-  return {
-    name: row[0] || undefined,
-    emails: row[1] ? row[1].split(", ").filter(Boolean) : undefined,
-    phones: row[2] ? row[2].split(", ").filter(Boolean) : undefined,
-    website: row[3] || undefined,
-  };
-};
-
 export interface GoogleSheetsConfig {
   spreadsheetId: string;
+  auth: OAuth2Client;
   sheetName?: string;
 }
 
@@ -83,30 +51,39 @@ export async function appendLeadsToSheet(
   duplicatesSkipped: number;
   totalLeads: number;
   error?: string;
+  notFound?: boolean;
 }> {
   try {
     console.log("🔵 Starting appendLeadsToSheet with", leads.length, "leads");
-    const sheets = getGoogleSheetsClient();
-    const { spreadsheetId, sheetName = "Leads" } = config;
+    const { spreadsheetId, auth, sheetName = "Leads" } = config;
+    const sheets = google.sheets({ version: "v4", auth });
 
-    console.log("🔵 Ensuring sheet exists:", { spreadsheetId, sheetName });
-    // Ensure the sheet exists and has headers
-    await ensureSheetExists(sheets, spreadsheetId, sheetName);
-    console.log("✅ Sheet exists and headers are set");
-
-    // Get existing data
+    // Get existing data (bounded window for dedupe)
     console.log("🔵 Getting existing data from sheet...");
-    const existingDataResponse = await sheets.spreadsheets.values.get({
+    const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+    const rowCount =
+      metadata.data.sheets?.find((s) => s.properties?.title === sheetName)
+        ?.properties?.gridProperties?.rowCount ?? 0;
+
+    const firstRow = Math.max(2, rowCount - 4999);
+
+    const existingDataResponse = await sheets.spreadsheets.values.batchGet({
       spreadsheetId,
-      range: `${sheetName}!A2:E`, // Skip header row
+      ranges: [`${sheetName}!A${firstRow}:A`, `${sheetName}!D${firstRow}:D`],
     });
 
-    const existingRows = existingDataResponse.data.values || [];
-    console.log("🔵 Found", existingRows.length, "existing rows");
-    const existingLeads = existingRows.map(rowToLead);
+    const names = existingDataResponse.data.valueRanges?.[0]?.values ?? [];
+    const websites = existingDataResponse.data.valueRanges?.[1]?.values ?? [];
 
-    // Create a set of existing lead keys for duplicate detection
-    const existingKeys = new Set(existingLeads.map(createLeadKey));
+    const existingKeys = new Set(
+      names.map((row, index) =>
+        createLeadKey({
+          name: row?.[0] || undefined,
+          website: websites[index]?.[0] || undefined,
+        })
+      )
+    );
+    console.log("🔵 Found", existingKeys.size, "existing keys");
 
     // Filter out duplicates from new leads
     const uniqueNewLeads = leads.filter((lead) => {
@@ -142,7 +119,7 @@ export async function appendLeadsToSheet(
       console.log("⚠️ No new unique leads to append");
     }
 
-    const totalLeads = existingLeads.length + uniqueNewLeads.length;
+    const totalLeads = existingKeys.size + uniqueNewLeads.length;
 
     return {
       success: true,
@@ -152,129 +129,23 @@ export async function appendLeadsToSheet(
     };
   } catch (error) {
     console.error("Error appending leads to Google Sheets:", error);
+
+    const notFound =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: number }).code === 404;
+
     return {
       success: false,
       newLeadsAdded: 0,
       duplicatesSkipped: 0,
       totalLeads: 0,
+      notFound,
       error:
         error instanceof Error
           ? error.message
           : "Failed to append leads to Google Sheets",
     };
-  }
-}
-
-/**
- * Ensures the sheet exists with proper headers
- */
-async function ensureSheetExists(
-  sheets: ReturnType<typeof google.sheets>,
-  spreadsheetId: string,
-  sheetName: string
-): Promise<void> {
-  try {
-    console.log("🔵 Checking if sheet exists...");
-    // Check if sheet exists
-    const spreadsheet = await sheets.spreadsheets.get({
-      spreadsheetId,
-    });
-
-    const sheetExists = spreadsheet.data.sheets?.some(
-      (sheet) => sheet.properties?.title === sheetName
-    );
-
-    console.log("🔵 Sheet exists:", sheetExists);
-
-    // Create sheet if it doesn't exist
-    if (!sheetExists) {
-      console.log("🔵 Creating new sheet:", sheetName);
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId,
-        requestBody: {
-          requests: [
-            {
-              addSheet: {
-                properties: {
-                  title: sheetName,
-                },
-              },
-            },
-          ],
-        },
-      });
-      console.log("✅ Sheet created");
-    }
-
-    // Check if headers exist
-    console.log("🔵 Checking if headers exist...");
-    const headerResponse = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `${sheetName}!A1:E1`,
-    });
-
-    const hasHeaders =
-      headerResponse.data.values && headerResponse.data.values.length > 0;
-    console.log("🔵 Has headers:", hasHeaders);
-
-    // Add headers if they don't exist
-    if (!hasHeaders) {
-      console.log("🔵 Adding headers to sheet...");
-      const updateResult = await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: `${sheetName}!A1:E1`,
-        valueInputOption: "RAW",
-        requestBody: {
-          values: [["Name", "Emails", "Phones", "Website", "Date Added"]],
-        },
-      });
-      console.log("✅ Headers added:", updateResult.data.updatedCells, "cells");
-
-      // Format headers (bold)
-      const sheetId = spreadsheet.data.sheets?.find(
-        (sheet) => sheet.properties?.title === sheetName
-      )?.properties?.sheetId;
-
-      if (sheetId !== undefined) {
-        console.log("🔵 Formatting headers...");
-        await sheets.spreadsheets.batchUpdate({
-          spreadsheetId,
-          requestBody: {
-            requests: [
-              {
-                repeatCell: {
-                  range: {
-                    sheetId,
-                    startRowIndex: 0,
-                    endRowIndex: 1,
-                  },
-                  cell: {
-                    userEnteredFormat: {
-                      textFormat: {
-                        bold: true,
-                      },
-                      backgroundColor: {
-                        red: 0.9,
-                        green: 0.9,
-                        blue: 0.9,
-                      },
-                    },
-                  },
-                  fields: "userEnteredFormat(textFormat,backgroundColor)",
-                },
-              },
-            ],
-          },
-        });
-        console.log("✅ Headers formatted");
-      }
-    }
-  } catch (error) {
-    console.error("❌ Error ensuring sheet exists:", error);
-    if (error instanceof Error) {
-      console.error("Error message:", error.message);
-      console.error("Error stack:", error.stack);
-    }
-    throw error;
   }
 }
