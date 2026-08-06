@@ -26,9 +26,22 @@ Clients need to run scrapes themselves and have leads land in a sheet of their o
 
 Any Google account can sign in, receive a provisioned sheet, and consume scraping
 capacity. This costs Render compute, though the Drive files now live in each
-signer's own Drive rather than yours. The design keeps a `maxLeads` claim in the scrape token so a per-user cap
-can be enforced later by changing one value in the token issuer, with no other
-changes.
+signer's own Drive rather than yours.
+
+**Correction 2026-08-06:** an earlier version of this document claimed the `maxLeads`
+claim in the scrape token was a per-user cap that could be enforced later by changing
+one value. Review proved otherwise. The backend clamps with
+`Math.min(requestedLimit, MAX_SEARCH_RESULTS, maxLeads)`, and `MAX_SEARCH_RESULTS` is
+15 while `maxLeads` is 60 — the claim can never be the minimum, so it binds nothing.
+It is also a per-request clamp against a per-run budget: the token carries no run
+identity and the backend keeps no counter, so a single token authorises unlimited
+requests for its 10-minute life.
+
+The token's actual guarantee is "the caller was a signed-in user within the last ten
+minutes". That is the intended authority check and it holds. But there is no volume
+cap anywhere in the system, and adding one requires server-side state — a per-user
+counter keyed by day or month, checked at mint time — which remains out of scope
+alongside billing and quotas.
 
 ### Revision 2026-08-05: no service account
 
@@ -53,11 +66,18 @@ spreadsheet. This is a better end state than the original:
 The cost is token lifecycle management — access tokens last about an hour, so the app
 stores refresh tokens and renews them. See "Per-user credentials" below.
 
-### Accepted constraint: consent screen audience
+### Consent screen audience — Published (confirmed 2026-08-06)
 
-While the OAuth consent screen stays in Testing mode, only accounts listed as test
-users can sign in, capped at 100. Publishing removes the cap and, because `drive.file`
-is non-sensitive, requires no verification review.
+The app is Published, not in Testing. Two consequences, one good and one open:
+
+- Refresh tokens do **not** expire on a schedule. The 7-day expiry applies only to apps
+  in Testing status, so the weekly-lockout scenario raised during review does not apply
+  here. Tokens die only on revocation, six months of disuse, or a password change.
+- Anyone with a Google account can sign in. Combined with the absence of any rate limit
+  or concurrency cap, one signed-in stranger can launch unbounded parallel Chromium
+  instances against a 512 MB Render instance. An email allowlist in a `signIn` callback
+  is the cheapest mitigation and matches the originally stated audience; it is not yet
+  implemented.
 
 ## Architecture
 
@@ -77,6 +97,17 @@ would fail on the first batch.
 
 Because the browser makes that call itself, the backend must authenticate it without
 holding a shared secret in the browser. Hence signed tokens.
+
+### Re-authentication
+
+Auth.js does not refresh stored tokens when a returning user signs in again: for an
+existing OAuth account with no active session it creates a `Session` and returns
+(`@auth/core/lib/actions/callback/handle-login.js:179-199`), never calling `linkAccount`
+or `updateUser`, so the tokens Google just issued are discarded. Because every auth
+error in this app tells the user to sign out and sign in again, that advice would have
+been inert. An `events.signIn` handler therefore upserts the fresh token set onto the
+existing `Account` row, guarded so a response without a `refresh_token` never overwrites
+a stored one.
 
 ### Per-user credentials
 
@@ -126,7 +157,7 @@ New files:
 | File | Responsibility |
 |---|---|
 | `src/lib/prisma.ts` | Prisma client singleton with a `globalThis` guard |
-| `src/auth.ts` | Auth.js config: Google provider with `drive.file` + offline access, Prisma adapter, `createUser` event |
+| `src/auth.ts` | Auth.js config: Google provider with `drive.file` + offline access, Prisma adapter, `linkAccount` event (provisioning) and `signIn` event (token refresh on re-auth) |
 | `src/lib/googleClient.ts` | `getUserGoogleClient(userId)` — per-user OAuth client with token refresh; `GoogleAuthError` |
 | `src/app/api/auth/[...nextauth]/route.ts` | Auth.js route handlers |
 | `src/lib/sheetProvisioning.ts` | `provisionSheetForUser(user)` — create in the user's Drive, write headers, persist |
@@ -169,8 +200,9 @@ A JWT signed with HS256 using `SCRAPE_TOKEN_SECRET`, a random string generated o
 receives the token but never the secret; it can read the claims but cannot alter them
 without invalidating the signature.
 
-Claims: `{ userId, maxLeads, exp }`, expiring 10 minutes after issue — long enough to
-outlive a 60-lead run.
+Claims: `{ userId, maxLeads, exp }`, expiring 10 minutes after issue. A full 60-lead
+run takes 11-13 minutes at the backend's configured delays, so the client mints one
+token per batch rather than one per run.
 
 The secret must never use the `NEXT_PUBLIC_` prefix, which would ship it to the
 browser and defeat the mechanism.
@@ -180,8 +212,9 @@ browser and defeat the mechanism.
 ### Provisioning (first sign-in)
 
 1. Client signs in with Google; Auth.js completes the OAuth round trip.
-2. The Prisma adapter inserts a `User` row and Auth.js fires the `createUser` event.
-3. The event calls `provisionSheetForUser`, using the client's own credentials:
+2. The Prisma adapter inserts a `User` row, then writes the `Account` row holding the
+   OAuth tokens, then Auth.js fires the `linkAccount` event.
+3. That event calls `provisionSheetForUser`, using the client's own credentials:
    1. `sheets.spreadsheets.create` — title `Leads — <email>`, one tab named `Leads`.
       Created in their Drive, owned by them.
    2. `values.update` — write and bold the five headers
@@ -189,9 +222,13 @@ browser and defeat the mechanism.
 
    No sharing step: it is already their file.
 
-   One ordering caveat: on a brand-new user, `createUser` can fire before the `Account`
-   row holding the tokens is written. Provisioning then throws `GoogleAuthError` and
-   falls through to the retry paths below — which is why both of them exist.
+   **Correction 2026-08-06:** this originally hooked `events.createUser`, described as
+   having an ordering caveat that "can" fire before the `Account` row exists. That was
+   wrong in a way a live test misread as working-as-designed: `@auth/core` awaits
+   `events.createUser` at `handle-login.js:160` and only calls `linkAccount` at `:161`,
+   so the tokens never existed yet and provisioning failed for **100% of sign-ups**,
+   always, by construction. It now hooks `events.linkAccount`, which fires immediately
+   after the Account row is written. The retry paths below remain as defence in depth.
 4. The dashboard reads `spreadsheetId` and shows a link to the sheet.
 
 Provisioning runs inside the sign-in callback and must finish within Vercel's 60

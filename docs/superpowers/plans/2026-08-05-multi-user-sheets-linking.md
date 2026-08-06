@@ -520,11 +520,17 @@ export async function getUserGoogleClient(
   client.setCredentials({
     access_token: account.access_token,
     refresh_token: account.refresh_token ?? undefined,
-    expiry_date: account.expires_at ? account.expires_at * 1000 : undefined,
+    // 1, not 0 and not undefined: isTokenExpiring() reads
+    // `expiryDate ? expiryDate <= now + threshold : false`, so ANY falsy value
+    // — including 0 — means "never expires" and skips the refresh entirely.
+    // 1 is truthy and safely in the past.
+    expiry_date: account.expires_at ? account.expires_at * 1000 : 1,
   });
 
+  let persisted: Promise<unknown> = Promise.resolve();
+
   client.on("tokens", (tokens) => {
-    void prisma.account
+    persisted = prisma.account
       .updateMany({
         where: { userId, provider: "google" },
         data: {
@@ -544,8 +550,11 @@ export async function getUserGoogleClient(
       });
   });
 
+  // 6 minutes, not 60 seconds: google-auth-library refreshes internally at a
+  // 5-minute threshold, and a failure there escapes un-wrapped as a raw Gaxios
+  // error. A wider margin keeps every refresh inside the guarded path below.
   const expiresSoon =
-    !account.expires_at || account.expires_at * 1000 - Date.now() < 60_000;
+    !account.expires_at || account.expires_at * 1000 - Date.now() < 6 * 60_000;
 
   if (expiresSoon) {
     if (!account.refresh_token) {
@@ -556,6 +565,10 @@ export async function getUserGoogleClient(
 
     try {
       await client.getAccessToken();
+      // The tokens event fires synchronously during the refresh, but its write
+      // is async. Serverless freezes the instance once the response settles, so
+      // await it here or a rotated refresh token can be lost permanently.
+      await persisted;
     } catch (error) {
       console.error("Google token refresh failed:", error);
       throw new GoogleAuthError(`Google access could not be renewed. ${RECONNECT}`);
@@ -566,7 +579,7 @@ export async function getUserGoogleClient(
 }
 ```
 
-`getAccessToken()` refreshes automatically when the stored token is expired, which is why there is no manual refresh call. The 60-second margin avoids handing out a token that expires mid-request.
+`getAccessToken()` refreshes automatically when the stored token is expired, which is why there is no manual refresh call. Three details are load-bearing and easy to get wrong: seeding `expiry_date: 1` rather than `0` or `undefined` (the library reads `expiryDate ? … : false`, so **any** falsy value means "never expires" and skips the refresh — 0 fails here exactly as undefined does); the 6-minute margin (the library's own eager threshold is 5 minutes, and a refresh it performs internally throws outside this guarded block); and awaiting the persist (serverless can freeze the instance before a fire-and-forget write lands).
 
 - [ ] **Step 2: Write the provisioning module**
 
@@ -636,16 +649,30 @@ export async function provisionSheetForUser(user: {
     },
   });
 
-  await prisma.user.update({
-    where: { id: user.id },
+  // Conditional write: createUser, the retry route, and the on-demand path in
+  // Task 4 can run concurrently. Whoever writes first wins; the loser returns
+  // the winner's id rather than its own, so the database stays consistent.
+  const claimed = await prisma.user.updateMany({
+    where: { id: user.id, spreadsheetId: null },
     data: { spreadsheetId },
   });
+
+  if (claimed.count === 0) {
+    const winner = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { spreadsheetId: true },
+    });
+
+    if (winner?.spreadsheetId) {
+      return winner.spreadsheetId;
+    }
+  }
 
   return spreadsheetId;
 }
 ```
 
-The database write is last on purpose: a failure partway through leaves an orphaned empty sheet in the user's Drive rather than a stored id pointing at something unusable.
+The database write is last on purpose: a failure partway through leaves an orphaned empty sheet in the user's Drive rather than a stored id pointing at something unusable. It is also conditional, because provisioning has three callers that can race; the losing caller returns the winner's id instead of its own.
 
 - [ ] **Step 3: Provision on first sign-in**
 
@@ -673,7 +700,7 @@ and add an `events` block alongside the existing `callbacks`:
 
 The `try`/`catch` is deliberate: a throw here would fail the whole sign-in over a transient Google error. Instead the user gets an account with a null `spreadsheetId` and recovers through the retry endpoint below.
 
-**Known ordering caveat, do not try to fix it here:** on a brand-new user, `createUser` may fire before the `Account` row holding the tokens is written, in which case `getUserGoogleClient` throws `GoogleAuthError` and provisioning is deferred to the retry path. That is why the retry endpoint and the on-demand provisioning in Task 4 both exist. Log it and move on.
+**Superseded 2026-08-06 — see the final-review fix.** This originally hooked `events.createUser` and described the missing `Account` row as an occasional ordering caveat. It is not occasional: `@auth/core` awaits `events.createUser` before calling `linkAccount`, so provisioning failed for every sign-up without exception. The correct hook is `events.linkAccount`, which fires immediately after the Account row is written. The retry paths remain as defence in depth.
 
 - [ ] **Step 4: Add the retry endpoint**
 
@@ -798,7 +825,7 @@ Delete the entire `ensureSheetExists` function and its call. Provisioning guaran
 
 - [ ] **Step 2: Narrow the dedupe read**
 
-Replace the existing-data block inside `appendLeadsToSheet` — the `values.get` on `${sheetName}!A2:E` and the `rowToLead` mapping — with a two-column, bounded read. `createLeadKey` reads only name and website, so fetching phones and timestamps is wasted bandwidth:
+Replace the existing-data block inside `appendLeadsToSheet` — the `values.get` on `${sheetName}!A2:E` and the `rowToLead` mapping — with a bounded read of the four columns `createLeadKey` actually uses. It reads `name` plus `website || emails[0] || phones[0]`, so all four are load-bearing: keying stored rows on name and website alone makes a website-less lead key as `name|` while the incoming lead keys as `name|email`, and dedupe silently fails for it forever. Extra ranges in one `batchGet` cost no additional round trip — only the timestamp column is dropped:
 
 ```typescript
     const metadata = await sheets.spreadsheets.get({ spreadsheetId });
@@ -1215,7 +1242,15 @@ function requireScrapeToken(req, res, next) {
   }
 
   try {
-    const claims = jwt.verify(token, secret);
+    // algorithms pins HS256 so a future switch to an asymmetric key cannot be
+    // downgraded. maxAge is the important one: jwt.verify only checks `exp` if
+    // the claim happens to be present, so without it a minter that forgot
+    // expiresIn would issue permanent credentials and this middleware would
+    // accept them forever. maxAge also rejects a token with no `iat` at all.
+    const claims = jwt.verify(token, secret, {
+      algorithms: ["HS256"],
+      maxAge: "10m",
+    });
 
     req.user = { userId: claims.userId, maxLeads: claims.maxLeads };
 
@@ -1410,7 +1445,7 @@ export async function scrapeBusinessesBatch(
 ): Promise<ScrapeResponse> {
 ```
 
-After the `totalLeads > 60` guard and before `const batchSize = 10;`, get the token once — a 10 minute lifetime covers the whole run:
+Mint a token per batch, inside the loop, immediately before each scrape call. Do NOT mint once for the whole run: a batch costs roughly 110-135 seconds against the backend's configured delays (`DELAY_BETWEEN_BUSINESSES` 2-5s across 10 businesses, up to 8 website visits at `WEBSITE_TIMEOUT` 8s, plus the scroll phase which grows with `start`), so a 60-lead run takes 11-13 minutes and outlives a 10-minute token. Minting is a single cheap POST against 5-8 seconds of idle sleep per batch:
 
 ```typescript
   let token: string;
@@ -1684,7 +1719,7 @@ Vercel builds do not run migrations, and `@prisma/client` needs generating again
 Push, then in the Render dashboard for the backend service set environment variables:
 
 - `SCRAPE_TOKEN_SECRET` — the value from Task 5
-- `CORS_ORIGIN` — leave as `http://localhost:3000` for now; corrected in step 5
+- `CORS_ORIGIN` — leave as `http://localhost:3000` for now; corrected in step 5. The code falls back to localhost when this is unset, so a forgotten variable in production surfaces as an opaque browser CORS error rather than a clear failure.
 
 Deploy, then confirm it is alive and closed:
 
@@ -1737,7 +1772,9 @@ Expect the first scrape after an idle period to hang ~50 seconds — the Render 
 
 - [ ] **Step 7: Update both READMEs**
 
-Both currently describe a single hard-coded spreadsheet. Update the setup sections to describe: signing in with Google, the sheet being created automatically, and the environment variables from `.env.example` in each repo. Remove every mention of `GOOGLE_SHEETS_SPREADSHEET_ID`.
+Both currently describe a single hard-coded spreadsheet. Update the setup sections to describe: signing in with Google, the sheet being created automatically in the user's own Drive, and the environment variables from `.env.example` in each repo. Remove every mention of `GOOGLE_SHEETS_SPREADSHEET_ID` and `GOOGLE_SHEETS_CREDENTIALS`.
+
+**Delete `GOOGLE_SHEETS_SETUP.md` entirely.** It walks the operator through creating a service account and downloading a JSON key — a path Google policy now blocks, and one this design no longer uses. Replace it with a short section in the frontend README covering what actually needs doing: create the OAuth client, add the `drive.file` scope, add test users or publish the consent screen.
 
 - [ ] **Step 8: Commit**
 
