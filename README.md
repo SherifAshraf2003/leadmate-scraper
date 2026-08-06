@@ -24,6 +24,7 @@
   - [Step 1: Set Up the Backend](#step-1-set-up-the-backend)
   - [Step 2: Set Up the Frontend](#step-2-set-up-the-frontend)
 - [Configuration](#-configuration)
+  - [Setting Up Google Sign-In](#setting-up-google-sign-in)
 - [Usage](#-usage)
 - [Project Structure](#-project-structure)
 - [Deployment](#-deployment)
@@ -41,7 +42,8 @@
 | 📧 **Contact Extraction**        | Get emails, phone numbers, and websites      |
 | 📱 **Responsive Design**         | Works on desktop, tablet, and mobile         |
 | 🌙 **Dark Mode**                 | Easy on the eyes with automatic theme        |
-| 📋 **Google Sheets Integration** | Auto-save leads with duplicate detection     |
+| 🔐 **Google Sign-In**            | Sign in with Google; no separate account needed |
+| 📋 **Automatic Google Sheet**    | A private spreadsheet is created in your own Drive on first sign-in, with duplicate detection on every scrape |
 | 💾 **Export Options**            | Download results as CSV or JSON              |
 | ⚡ **Real-time Progress**        | See live scraping progress                   |
 
@@ -49,7 +51,7 @@
 
 ## 🚀 Quick Start
 
-> **Important:** This frontend requires the backend server to be running. Follow all steps in order!
+> **Important:** This frontend requires the backend server to be running, a Postgres database (Neon works well), and a Google OAuth client. Follow all steps in order!
 
 ```bash
 # 1. Clone and set up the BACKEND first
@@ -63,15 +65,23 @@ git clone https://github.com/SherifAshraf2003/leads-scraper.git
 cd leads-scraper
 npm install
 
-# 3. Create your environment file
+# 3. Create your environment file and fill in every value
 cp .env.example .env.local
-# Edit .env.local and set: NEXT_PUBLIC_SCRAPER_API_URL=http://localhost:3001
+# See "Environment Variables" below for what each one needs to be, and
+# "Setting Up Google Sign-In" for how to create the OAuth client.
 
-# 4. Start the frontend
+# 4. Apply the database schema
+npx prisma migrate deploy
+
+# 5. Start the frontend
 npm run dev
 
-# 5. Open http://localhost:3000 in your browser
+# 6. Open http://localhost:3000, and sign in with Google
 ```
+
+Signing in creates your account row in Postgres and, in the background, a private
+spreadsheet named `Leads — <your email>` in your own Google Drive — there is no
+shared spreadsheet and no service account involved.
 
 ---
 
@@ -220,21 +230,42 @@ cp .env.example .env.local
 
 #### 2.5 Configure the Environment File
 
-Open `.env.local` in any text editor and update it:
+Open `.env.local` in any text editor and fill in every value. All six variables
+are required — there is no optional subset for local development, because
+sign-in, the database, and the scrape token all depend on them:
 
 ```env
 # Backend API URL - Point to your running backend
 NEXT_PUBLIC_SCRAPER_API_URL=http://localhost:3001
 
-# Google Sheets Integration (optional - see GOOGLE_SHEETS_SETUP.md)
-# GOOGLE_SHEETS_SPREADSHEET_ID=your_spreadsheet_id
-# GOOGLE_SHEETS_SHEET_NAME=Leads
-# GOOGLE_SHEETS_CREDENTIALS='{"type":"service_account",...}'
+# Neon Postgres, pooled connection string (hostname contains "-pooler")
+DATABASE_URL=postgresql://user:password@host-pooler.region.aws.neon.tech/db?sslmode=require
+
+# Auth.js session encryption key: openssl rand -base64 32
+AUTH_SECRET=
+
+# Google Cloud Console -> Credentials -> your OAuth client
+AUTH_GOOGLE_ID=
+AUTH_GOOGLE_SECRET=
+
+# Shared with the backend, byte-identical on both sides: openssl rand -base64 32
+SCRAPE_TOKEN_SECRET=
 ```
 
-> 💡 **Tip:** For local development, you only need to set `NEXT_PUBLIC_SCRAPER_API_URL`
+See [Setting Up Google Sign-In](#-setting-up-google-sign-in) below for how to
+create the OAuth client and get `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET`.
 
-#### 2.6 Start the Frontend
+#### 2.6 Apply the Database Schema
+
+```bash
+npx prisma migrate deploy
+```
+
+This creates the `User`, `Account`, `Session`, and `VerificationToken` tables
+that Auth.js and the sheet-linking logic use. In production this same command
+runs automatically as part of `npm run build` (see [Deployment](#-deployment)).
+
+#### 2.7 Start the Frontend
 
 ```bash
 npm run dev
@@ -247,9 +278,11 @@ You should see:
   - Local:        http://localhost:3000
 ```
 
-#### 2.7 Open in Browser
+#### 2.8 Open in Browser and Sign In
 
-Open your web browser and go to: **http://localhost:3000**
+Open your web browser, go to **http://localhost:3000**, and sign in with
+Google. The first sign-in creates your user record and provisions your
+private spreadsheet in the background.
 
 🎉 **Congratulations! You're all set up!**
 
@@ -259,19 +292,68 @@ Open your web browser and go to: **http://localhost:3000**
 
 ### Environment Variables
 
-Create a `.env.local` file in the root directory with these variables:
+Create a `.env.local` file in the root directory (copy `.env.example` as a
+starting point) with these variables. Every one of them is required — none
+are optional, because sign-in, the database, and the scrape-token exchange
+with the backend all depend on them:
 
-| Variable                       | Required | Description                                 | Example                                        |
-| ------------------------------ | -------- | ------------------------------------------- | ---------------------------------------------- |
-| `NEXT_PUBLIC_SCRAPER_API_URL`  | ✅ Yes   | URL where your backend is running           | `http://localhost:3001`                        |
-| `GOOGLE_SHEETS_SPREADSHEET_ID` | ❌ No    | Your Google Sheets ID for auto-saving leads | `1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms` |
-| `GOOGLE_SHEETS_SHEET_NAME`     | ❌ No    | Name of the sheet tab (default: "Leads")    | `Leads`                                        |
-| `GOOGLE_SHEETS_CREDENTIALS`    | ❌ No    | Google service account JSON (one line)      | `'{"type":"service_account",...}'`             |
+| Variable                      | Required | Description                                                                     | Example                                                                 |
+| ------------------------------ | -------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `NEXT_PUBLIC_SCRAPER_API_URL`  | ✅ Yes   | URL where your backend is running                                                | `http://localhost:3001`                                                 |
+| `DATABASE_URL`                 | ✅ Yes   | Neon Postgres pooled connection string (hostname contains `-pooler`)             | `postgresql://user:pw@host-pooler.region.aws.neon.tech/db?sslmode=require` |
+| `AUTH_SECRET`                  | ✅ Yes   | Auth.js session encryption key; generate with `openssl rand -base64 32`          | (random string)                                                          |
+| `AUTH_GOOGLE_ID`               | ✅ Yes   | OAuth client ID from Google Cloud Console                                        | `1234567890-abc.apps.googleusercontent.com`                             |
+| `AUTH_GOOGLE_SECRET`           | ✅ Yes   | OAuth client secret from Google Cloud Console                                    | (secret string)                                                          |
+| `SCRAPE_TOKEN_SECRET`          | ✅ Yes   | Signing key for the short-lived scrape token; must be byte-identical to the backend's `SCRAPE_TOKEN_SECRET`, and generated the same way | (random string) |
 
-### Google Sheets Integration (Optional)
+There is no `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, or
+`GOOGLE_SHEETS_CREDENTIALS` variable in this design — see below.
 
-Want leads automatically saved to a Google Sheet? See the detailed guide:
-📄 [GOOGLE_SHEETS_SETUP.md](./GOOGLE_SHEETS_SETUP.md)
+### How Leads Reach Google Sheets
+
+There is no shared spreadsheet and no service account. When a user signs in
+for the first time, the app uses that user's own Google credentials (granted
+during sign-in, scoped to `drive.file`) to create a spreadsheet named
+`Leads — <their email>` directly in **their own Google Drive**, and stores
+its id against their account row in Postgres. Every scrape after that appends
+rows to that same spreadsheet and skips rows that duplicate an existing
+website. Nothing is ever shared with, or visible to, the app owner's account
+or any other user.
+
+### Setting Up Google Sign-In
+
+Every developer or deployment needs its own Google OAuth client — there is no
+shared one, and there is no service account or JSON key file involved at all
+(a Google Cloud org policy, `iam.disableServiceAccountKeyCreation`, blocks
+creating service account keys on this project, which is part of why this
+design uses per-user OAuth instead).
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), open (or
+   create) a project, then go to **APIs & Services → Credentials**.
+2. Click **Create Credentials → OAuth client ID**, and choose **Web
+   application** as the application type.
+3. Under **Authorized redirect URIs**, add one entry per environment you run:
+   - Local development: `http://localhost:3000/api/auth/callback/google`
+   - Production: `https://<your-deployed-domain>/api/auth/callback/google`
+
+   Sign-in fails with `redirect_uri_mismatch` until the exact URI you're
+   using is saved here.
+4. Copy the generated **Client ID** and **Client secret** into
+   `AUTH_GOOGLE_ID` and `AUTH_GOOGLE_SECRET`.
+5. Go to **APIs & Services → OAuth consent screen** and confirm the scope
+   `.../auth/drive.file` (Google Drive, "See, edit, create, and delete only
+   the specific Google Drive files you use with this app") is requested —
+   the app already requests it in code, but it must be an allowed scope on
+   the consent screen.
+6. Set the consent screen's **User type** to **External**, and decide its
+   publishing status:
+   - **Testing** (default): only Google accounts you explicitly add as test
+     users can sign in, capped at 100 users. Anyone else gets
+     `Error 403: access_denied`.
+   - **Published**: any Google account can sign in. Because `drive.file` is
+     classified as a non-sensitive scope, publishing this app requires **no**
+     Google verification review — click **Publish App** when you're ready
+     for real users.
 
 ---
 
@@ -311,21 +393,35 @@ Want leads automatically saved to a Google Sheet? See the detailed guide:
 
 ```
 leads-scraper/
+├── 📁 prisma/
+│   ├── schema.prisma                 # User / Account / Session / VerificationToken models
+│   └── 📁 migrations/                # Applied with `prisma migrate deploy`
 ├── 📁 src/
 │   ├── 📁 app/
 │   │   ├── 📁 api/
-│   │   │   └── 📁 save-to-sheets/
-│   │   │       └── route.ts          # Google Sheets API endpoint
+│   │   │   ├── 📁 auth/[...nextauth]/
+│   │   │   │   └── route.ts          # Auth.js sign-in/callback handlers
+│   │   │   ├── 📁 provision-sheet/
+│   │   │   │   └── route.ts          # On-demand retry if sheet creation failed at sign-up
+│   │   │   ├── 📁 save-to-sheets/
+│   │   │   │   └── route.ts          # Appends a scraped batch to the user's sheet
+│   │   │   └── 📁 scrape-token/
+│   │   │       └── route.ts          # Mints the short-lived JWT the browser sends to the backend
 │   │   ├── layout.tsx                # Root layout with metadata
 │   │   ├── page.tsx                  # Main scraper UI
+│   │   ├── providers.tsx             # Session provider
 │   │   └── globals.css               # Global styles
+│   ├── auth.ts                       # Auth.js configuration (Google provider, drive.file scope)
 │   └── 📁 lib/
-│       ├── scraperApi.ts             # API client for backend
-│       └── googleSheets.ts           # Google Sheets integration
+│       ├── scraperApi.ts             # Calls the backend directly with the scrape token
+│       ├── scrapeToken.ts            # Signs the HS256 scrape token
+│       ├── googleClient.ts           # Builds a Google API client from the signed-in user's tokens
+│       ├── sheetProvisioning.ts      # Creates the user's spreadsheet in their own Drive
+│       ├── googleSheets.ts           # Reads/writes rows in the user's spreadsheet
+│       └── prisma.ts                 # Prisma client singleton
 ├── 📁 public/                        # Static assets
 ├── .env.example                      # Environment template
 ├── .env.local                        # Your local config (create this)
-├── GOOGLE_SHEETS_SETUP.md           # Google Sheets guide
 ├── package.json                      # Dependencies
 └── README.md                         # This file
 ```
@@ -343,15 +439,27 @@ leads-scraper/
 3. **Import your repository**
    - Click "New Project"
    - Select your GitHub repository
-4. **Configure Environment Variables**
-   - Click "Environment Variables"
-   - Add: `NEXT_PUBLIC_SCRAPER_API_URL` = Your deployed backend URL
-   - (Optional) Add Google Sheets variables
-5. **Deploy!** Click "Deploy" and wait ~2 minutes
+4. **Configure Environment Variables** — set every variable listed under
+   [Environment Variables](#environment-variables) above:
+   `DATABASE_URL`, `AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`,
+   `SCRAPE_TOKEN_SECRET`, and `NEXT_PUBLIC_SCRAPER_API_URL` (your deployed
+   backend's URL). Confirm none of `GOOGLE_SHEETS_SPREADSHEET_ID`,
+   `GOOGLE_SHEETS_SHEET_NAME`, or `GOOGLE_SHEETS_CREDENTIALS` is present —
+   this design has no service account and does not use them.
+5. **Deploy!** The build runs `prisma generate && prisma migrate deploy && next build --turbopack`,
+   so pending migrations are applied automatically on every deploy — there is
+   no separate migration step to run by hand. Wait ~2 minutes.
+6. **Add the production redirect URI.** Once you have the resulting Vercel
+   domain, go back to Google Cloud Console → Credentials → your OAuth client,
+   and add `https://<your-vercel-domain>/api/auth/callback/google` under
+   Authorized redirect URIs. Sign-in fails with `redirect_uri_mismatch` until
+   this is saved. See [Setting Up Google Sign-In](#setting-up-google-sign-in).
 
 ### Deploy Backend to Render (Free)
 
-Your backend needs to be deployed too! Follow the instructions in the backend repository.
+Your backend needs to be deployed too! Follow the instructions in the backend
+repository's README, in particular setting `SCRAPE_TOKEN_SECRET` (byte-identical
+to the frontend's) and `CORS_ORIGIN` (your Vercel domain) on the Render service.
 
 Once deployed, update your frontend's `NEXT_PUBLIC_SCRAPER_API_URL` to your Render URL:
 
@@ -458,7 +566,10 @@ npm run dev -- -p 3001
 | [React 19](https://react.dev/)                | UI library                      |
 | [TypeScript](https://www.typescriptlang.org/) | Type safety                     |
 | [Tailwind CSS 4](https://tailwindcss.com/)    | Styling                         |
-| [Google APIs](https://googleapis.dev/)        | Google Sheets integration       |
+| [Auth.js v5](https://authjs.dev/)             | Google sign-in                  |
+| [Prisma](https://www.prisma.io/) + [Neon](https://neon.tech/) | Per-user data in Postgres |
+| [Google APIs](https://googleapis.dev/)        | Per-user Google Sheets creation and writes |
+| [jsonwebtoken](https://github.com/auth0/node-jsonwebtoken) | Signs/verifies the short-lived scrape token |
 
 ---
 
