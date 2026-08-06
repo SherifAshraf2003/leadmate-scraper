@@ -38,7 +38,7 @@
 | Feature                          | Description                                  |
 | -------------------------------- | -------------------------------------------- |
 | 🔍 **Smart Search**              | Search for any business type in any location |
-| 📊 **Batch Scraping**            | Scrape up to 100+ leads at once              |
+| 📊 **Batch Scraping**            | Scrape up to 60 leads per run                |
 | 📧 **Contact Extraction**        | Get emails, phone numbers, and websites      |
 | 📱 **Responsive Design**         | Works on desktop, tablet, and mobile         |
 | 🌙 **Dark Mode**                 | Easy on the eyes with automatic theme        |
@@ -230,16 +230,24 @@ cp .env.example .env.local
 
 #### 2.5 Configure the Environment File
 
-Open `.env.local` in any text editor and fill in every value. All six variables
-are required — there is no optional subset for local development, because
-sign-in, the database, and the scrape token all depend on them:
+Open `.env.local` in any text editor and fill in every value. All seven
+variables are required — there is no optional subset for local development,
+because sign-in, the database, migrations, and the scrape token all depend
+on them:
 
 ```env
 # Backend API URL - Point to your running backend
 NEXT_PUBLIC_SCRAPER_API_URL=http://localhost:3001
 
-# Neon Postgres, pooled connection string (hostname contains "-pooler")
+# Neon Postgres, pooled connection string (hostname contains "-pooler") —
+# used for the app's runtime queries
 DATABASE_URL=postgresql://user:password@host-pooler.region.aws.neon.tech/db?sslmode=require
+
+# Neon Postgres, UNPOOLED connection string (no "-pooler" in the hostname) —
+# used only by Prisma Migrate, which needs a session-level connection for
+# its advisory lock that the pooled (PgBouncer transaction-mode) endpoint
+# cannot provide
+DIRECT_URL=postgresql://user:password@host.region.aws.neon.tech/db?sslmode=require
 
 # Auth.js session encryption key: openssl rand -base64 32
 AUTH_SECRET=
@@ -252,7 +260,7 @@ AUTH_GOOGLE_SECRET=
 SCRAPE_TOKEN_SECRET=
 ```
 
-See [Setting Up Google Sign-In](#-setting-up-google-sign-in) below for how to
+See [Setting Up Google Sign-In](#setting-up-google-sign-in) below for how to
 create the OAuth client and get `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET`.
 
 #### 2.6 Apply the Database Schema
@@ -300,7 +308,8 @@ with the backend all depend on them:
 | Variable                      | Required | Description                                                                     | Example                                                                 |
 | ------------------------------ | -------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `NEXT_PUBLIC_SCRAPER_API_URL`  | ✅ Yes   | URL where your backend is running                                                | `http://localhost:3001`                                                 |
-| `DATABASE_URL`                 | ✅ Yes   | Neon Postgres pooled connection string (hostname contains `-pooler`)             | `postgresql://user:pw@host-pooler.region.aws.neon.tech/db?sslmode=require` |
+| `DATABASE_URL`                 | ✅ Yes   | Neon Postgres **pooled** connection string (hostname contains `-pooler`); used for the app's runtime queries | `postgresql://user:pw@host-pooler.region.aws.neon.tech/db?sslmode=require` |
+| `DIRECT_URL`                   | ✅ Yes   | Neon Postgres **unpooled** connection string (no `-pooler` in the hostname); used only by Prisma Migrate, which needs a session-level connection for its advisory lock that the pooled endpoint can't provide | `postgresql://user:pw@host.region.aws.neon.tech/db?sslmode=require` |
 | `AUTH_SECRET`                  | ✅ Yes   | Auth.js session encryption key; generate with `openssl rand -base64 32`          | (random string)                                                          |
 | `AUTH_GOOGLE_ID`               | ✅ Yes   | OAuth client ID from Google Cloud Console                                        | `1234567890-abc.apps.googleusercontent.com`                             |
 | `AUTH_GOOGLE_SECRET`           | ✅ Yes   | OAuth client secret from Google Cloud Console                                    | (secret string)                                                          |
@@ -316,8 +325,13 @@ for the first time, the app uses that user's own Google credentials (granted
 during sign-in, scoped to `drive.file`) to create a spreadsheet named
 `Leads — <their email>` directly in **their own Google Drive**, and stores
 its id against their account row in Postgres. Every scrape after that appends
-rows to that same spreadsheet and skips rows that duplicate an existing
-website. Nothing is ever shared with, or visible to, the app owner's account
+rows to that same spreadsheet, skipping any lead whose name combined with its
+website already exists in the sheet; if a lead has no website, its name plus
+its first email is used instead, and if it has neither website nor email, its
+name plus the digits of its first phone number is used. Two different
+businesses that happen to share a website (e.g. two franchise locations) are
+not treated as duplicates of each other, because the name is part of the key
+too. Nothing is ever shared with, or visible to, the app owner's account
 or any other user.
 
 ### Setting Up Google Sign-In
@@ -363,11 +377,13 @@ design uses per-user OAuth instead).
 
 1. **Enter a search query** in the search box
    - Example: `"dentists in Calgary"` or `"restaurants in New York"`
-2. **Set the number of leads** you want (10-100+)
+2. **Set the number of leads** you want (up to 60 per run; larger runs are rejected)
 
 3. **Click "Scrape"** or press Enter
 
-4. **Wait for results** (may take 30-60 seconds depending on quantity)
+4. **Wait for results** — a full 60-lead run takes about 11-13 minutes, since
+   the frontend fetches in batches of 10 with a delay between each to avoid
+   rate limiting; a small run of 10 leads finishes in under 2 minutes
 
 5. **View your leads** with extracted:
 
@@ -384,7 +400,7 @@ design uses per-user OAuth instead).
 | -------------------------------------- | ------------------------------- |
 | Be specific: "plumbers in Miami"       | Be vague: "plumbers"            |
 | Include location: "lawyers in Toronto" | Skip location                   |
-| Start with 10-20 leads to test         | Request 100+ leads initially    |
+| Start with 10-20 leads to test         | Request more than 60 leads (the app rejects it) |
 | Wait for one search to complete        | Start multiple searches at once |
 
 ---
@@ -441,11 +457,14 @@ leads-scraper/
    - Select your GitHub repository
 4. **Configure Environment Variables** — set every variable listed under
    [Environment Variables](#environment-variables) above:
-   `DATABASE_URL`, `AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`,
-   `SCRAPE_TOKEN_SECRET`, and `NEXT_PUBLIC_SCRAPER_API_URL` (your deployed
-   backend's URL). Confirm none of `GOOGLE_SHEETS_SPREADSHEET_ID`,
-   `GOOGLE_SHEETS_SHEET_NAME`, or `GOOGLE_SHEETS_CREDENTIALS` is present —
-   this design has no service account and does not use them.
+   `DATABASE_URL`, `DIRECT_URL`, `AUTH_SECRET`, `AUTH_GOOGLE_ID`,
+   `AUTH_GOOGLE_SECRET`, `SCRAPE_TOKEN_SECRET`, and
+   `NEXT_PUBLIC_SCRAPER_API_URL` (your deployed backend's URL).
+   `DIRECT_URL` is required, not optional — the build fails outright without
+   it (see the warning below). Confirm none of
+   `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_SHEET_NAME`, or
+   `GOOGLE_SHEETS_CREDENTIALS` is present — this design has no service
+   account and does not use them.
 5. **Deploy!** The build runs `prisma generate && prisma migrate deploy && next build --turbopack`,
    so pending migrations are applied automatically on every deploy — there is
    no separate migration step to run by hand. Wait ~2 minutes.
@@ -454,6 +473,15 @@ leads-scraper/
    and add `https://<your-vercel-domain>/api/auth/callback/google` under
    Authorized redirect URIs. Sign-in fails with `redirect_uri_mismatch` until
    this is saved. See [Setting Up Google Sign-In](#setting-up-google-sign-in).
+
+> ⚠️ **`DIRECT_URL` and preview deployments.** Because `prisma migrate deploy`
+> runs as part of `npm run build`, and Vercel runs that same build for every
+> **preview** deployment (not just production), every preview build also runs
+> migrations against whatever database `DIRECT_URL` points at. If `DIRECT_URL`
+> is shared across environments, opening a pull request can migrate your
+> production database. Point preview environments' `DIRECT_URL` (and
+> `DATABASE_URL`) at a separate Neon branch database, or move the migration
+> step out of the build script once this becomes a problem in practice.
 
 ### Deploy Backend to Render (Free)
 
