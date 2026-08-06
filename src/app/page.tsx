@@ -5,6 +5,7 @@ import { useSession, signIn, signOut } from "next-auth/react";
 import {
   scrapeBusinesses,
   scrapeBusinessesBatch,
+  fetchScrapeToken,
   type BusinessLead,
   type BatchProgress,
 } from "@/lib/scraperApi";
@@ -66,7 +67,47 @@ export default function Home() {
     null
   );
   const [sheetsStatus, setSheetsStatus] = useState<string | null>(null);
-  const { data: session } = useSession();
+  const [spreadsheetId, setSpreadsheetId] = useState<string | null>(null);
+  const [provisioning, setProvisioning] = useState(false);
+  const [partialWarning, setPartialWarning] = useState<string | null>(null);
+  const { data: session, status } = useSession();
+
+  const saveLeads = async (leads: BusinessLead[]) => {
+    const response = await fetch("/api/save-to-sheets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leads }),
+    });
+
+    const data = await response.json();
+
+    if (data.success) {
+      setSpreadsheetId(data.data.spreadsheetId);
+      setSheetsStatus(
+        `✅ Saved to your sheet: ${data.data.newLeadsAdded} new, ${data.data.duplicatesSkipped} duplicates skipped`
+      );
+    } else {
+      setSheetsStatus(`⚠️ Google Sheets: ${data.error}`);
+    }
+  };
+
+  const handleProvision = async () => {
+    setProvisioning(true);
+
+    try {
+      const response = await fetch("/api/provision-sheet", { method: "POST" });
+      const data = await response.json();
+
+      if (data.spreadsheetId) {
+        setSpreadsheetId(data.spreadsheetId);
+        setSheetsStatus(null);
+      } else {
+        setSheetsStatus(`⚠️ Could not create your sheet: ${data.error}`);
+      }
+    } finally {
+      setProvisioning(false);
+    }
+  };
 
   const handleScrape = async () => {
     if (!query.trim()) {
@@ -79,51 +120,33 @@ export default function Home() {
     setResults(null);
     setBatchProgress(null);
     setSheetsStatus(null);
+    setPartialWarning(null);
 
     try {
       let response;
 
-      // Use batch fetching if totalLeads > 10
       if (totalLeads > 10) {
         response = await scrapeBusinessesBatch(
           query,
           totalLeads,
-          (progress) => {
-            setBatchProgress(progress);
-          }
+          (progress) => setBatchProgress(progress),
+          saveLeads
         );
       } else {
-        response = await scrapeBusinesses(query, 0, totalLeads);
+        const token = await fetchScrapeToken();
+        response = await scrapeBusinesses(query, 0, totalLeads, token);
+
+        if (response.success && response.data) {
+          await saveLeads(response.data);
+        }
       }
 
       if (response.success && response.data) {
         setResults(response.data);
         setBatchProgress(null);
 
-        // Save to Google Sheets
-        try {
-          const sheetsResponse = await fetch("/api/save-to-sheets", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ leads: response.data }),
-          });
-
-          const sheetsData = await sheetsResponse.json();
-
-          if (sheetsData.success) {
-            setSheetsStatus(
-              `✅ Saved to Google Sheets: ${sheetsData.data.newLeadsAdded} new, ${sheetsData.data.duplicatesSkipped} duplicates skipped`
-            );
-          } else {
-            setSheetsStatus(`⚠️ Google Sheets: ${sheetsData.error}`);
-          }
-        } catch (sheetsError) {
-          console.error("Error saving to Google Sheets:", sheetsError);
-          setSheetsStatus(
-            "⚠️ Failed to save to Google Sheets (check console for details)"
-          );
+        if (response.partial && response.error) {
+          setPartialWarning(response.error);
         }
       } else {
         setError(response.error || "Failed to scrape businesses");
@@ -143,18 +166,61 @@ export default function Home() {
     }
   };
 
+  if (status === "loading") {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-gray-500">
+        Loading…
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-6 px-4 text-center">
+        <h1 className="text-4xl font-bold">Leads Scraper</h1>
+        <p className="text-gray-600 dark:text-gray-400 max-w-md">
+          Sign in with Google. We&apos;ll create a spreadsheet for you and save
+          every lead you scrape straight into it.
+        </p>
+        <button
+          onClick={() => signIn("google")}
+          className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium shadow-lg transition-colors"
+        >
+          Sign in with Google
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 py-8 sm:py-16 px-4">
       <div className="max-w-5xl mx-auto">
-        <div className="flex justify-end items-center gap-3 mb-4 text-sm">
-          {session ? (
-            <>
-              <span className="text-gray-600 dark:text-gray-400">{session.user?.email}</span>
-              <button onClick={() => signOut()} className="underline">Sign out</button>
-            </>
+        <div className="flex flex-wrap justify-end items-center gap-4 mb-6 text-sm">
+          {spreadsheetId ? (
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 dark:text-blue-400 hover:underline font-medium"
+            >
+              Your leads sheet →
+            </a>
           ) : (
-            <button onClick={() => signIn("google")} className="underline">Sign in with Google</button>
+            <button
+              onClick={handleProvision}
+              disabled={provisioning}
+              className="text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
+            >
+              {provisioning ? "Setting up…" : "Set up your sheet"}
+            </button>
           )}
+          <span className="text-gray-500 dark:text-gray-400">{session.user?.email}</span>
+          <button
+            onClick={() => signOut()}
+            className="text-gray-500 dark:text-gray-400 hover:underline"
+          >
+            Sign out
+          </button>
         </div>
         {/* Header */}
         <div className="text-center mb-12">
@@ -442,6 +508,15 @@ export default function Home() {
               }`}
             >
               {sheetsStatus}
+            </p>
+          </div>
+        )}
+
+        {/* Partial Run Warning */}
+        {partialWarning && !loading && (
+          <div className="bg-amber-50/80 dark:bg-amber-900/20 backdrop-blur-sm border-2 border-amber-300 dark:border-amber-800 rounded-2xl p-4 mb-6 shadow-lg">
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+              ⚠️ {partialWarning}
             </p>
           </div>
         )}
