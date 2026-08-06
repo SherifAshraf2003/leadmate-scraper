@@ -20,17 +20,37 @@ export interface BatchProgress {
 
 export type ProgressCallback = (progress: BatchProgress) => void;
 
+export type BatchSavedCallback = (leads: BusinessLead[]) => Promise<void>;
+
+export async function fetchScrapeToken(): Promise<string> {
+  const response = await fetch("/api/scrape-token", { method: "POST" });
+
+  if (!response.ok) {
+    throw new Error(
+      response.status === 401
+        ? "You are signed out. Sign in again to scrape."
+        : "Could not get a scrape token"
+    );
+  }
+
+  const data = await response.json();
+
+  return data.token;
+}
+
 /**
  * Fetches business leads from the backend scraper API
  * @param query - Search query (e.g., "Calgary dentists")
  * @param start - Starting index for pagination (default: 0)
  * @param limit - Number of results to fetch (default: 10)
+ * @param token - Bearer token authenticating this request
  * @returns Promise with scraped business data
  */
 export async function scrapeBusinesses(
   query: string,
   start: number = 0,
-  limit: number = 10
+  limit: number = 10,
+  token: string
 ): Promise<ScrapeResponse> {
   if (!query.trim()) {
     return {
@@ -49,6 +69,7 @@ export async function scrapeBusinesses(
 
     const response = await fetch(url, {
       method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
     });
 
     if (!response.ok) {
@@ -56,11 +77,6 @@ export async function scrapeBusinesses(
     }
 
     const data = await response.json();
-
-    // Enhanced logging for debugging
-    console.log("=== SCRAPER API RESPONSE DEBUG ===");
-    console.log("Raw response:", data);
-    console.log("Response keys:", Object.keys(data));
 
     // Try multiple possible data locations
     const leads = data.results;
@@ -94,7 +110,8 @@ export async function scrapeBusinesses(
 export async function scrapeBusinessesBatch(
   query: string,
   totalLeads: number,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  onBatchSaved?: BatchSavedCallback
 ): Promise<ScrapeResponse> {
   if (!query.trim()) {
     return {
@@ -117,6 +134,17 @@ export async function scrapeBusinessesBatch(
     };
   }
 
+  let token: string;
+
+  try {
+    token = await fetchScrapeToken();
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Could not authenticate",
+    };
+  }
+
   const batchSize = 10;
   const numBatches = Math.ceil(totalLeads / batchSize);
   const allResults: BusinessLead[] = [];
@@ -129,10 +157,18 @@ export async function scrapeBusinessesBatch(
     console.log(`Fetching batch ${i + 1}/${numBatches}...`);
 
     try {
-      const response = await scrapeBusinesses(query, start, limit);
+      const response = await scrapeBusinesses(query, start, limit, token);
 
       if (response.success && response.data) {
         allResults.push(...response.data);
+
+        if (onBatchSaved) {
+          try {
+            await onBatchSaved(response.data);
+          } catch (saveError) {
+            console.error(`Failed to save batch ${i + 1}:`, saveError);
+          }
+        }
 
         // Call progress callback if provided
         if (onProgress) {
