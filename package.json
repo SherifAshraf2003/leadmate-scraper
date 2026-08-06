@@ -6,7 +6,10 @@
     "dev": "next dev --turbopack",
     "build": "prisma generate && prisma migrate deploy && next build --turbopack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:migrate": "set -a && . ./.env.local && set +a && prisma migrate deploy",
+    "db:status": "set -a && . ./.env.local && set +a && prisma migrate status",
+    "db:studio": "set -a && . ./.env.local && set +a && prisma studio"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",

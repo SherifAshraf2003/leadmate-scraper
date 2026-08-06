@@ -67,11 +67,24 @@ export default function Home() {
     null
   );
   const [sheetsStatus, setSheetsStatus] = useState<string | null>(null);
-  const [spreadsheetId, setSpreadsheetId] = useState<string | null>(null);
   const [provisioning, setProvisioning] = useState(false);
   const [partialWarning, setPartialWarning] = useState<string | null>(null);
   const { data: session, status } = useSession();
   const savedTotalsRef = useRef({ newLeadsAdded: 0, duplicatesSkipped: 0 });
+
+  // Only holds an id this page learned during *this* session — from a save, a
+  // provision, or the 404-replacement swap in /api/save-to-sheets. The
+  // authoritative value for a returning user comes from the session, which the
+  // `session` callback in src/auth.ts populates straight off the User row.
+  // Deriving rather than seeding useState matters because useSession() starts
+  // as `loading` with no user: a useState initializer would run once against
+  // `undefined` and never see the id arrive, leaving a user with hundreds of
+  // saved leads staring at "Set up your sheet" on every page load.
+  const [freshSpreadsheetId, setFreshSpreadsheetId] = useState<string | null>(
+    null
+  );
+  const spreadsheetId =
+    freshSpreadsheetId ?? session?.user?.spreadsheetId ?? null;
 
   const saveLeads = async (leads: BusinessLead[]) => {
     const response = await fetch("/api/save-to-sheets", {
@@ -83,7 +96,7 @@ export default function Home() {
     const data = await response.json();
 
     if (data.success) {
-      setSpreadsheetId(data.data.spreadsheetId);
+      setFreshSpreadsheetId(data.data.spreadsheetId);
       savedTotalsRef.current = {
         newLeadsAdded:
           savedTotalsRef.current.newLeadsAdded + (data.data.newLeadsAdded ?? 0),
@@ -109,7 +122,7 @@ export default function Home() {
       const data = await response.json();
 
       if (data.spreadsheetId) {
-        setSpreadsheetId(data.spreadsheetId);
+        setFreshSpreadsheetId(data.spreadsheetId);
         setSheetsStatus(null);
       } else {
         setSheetsStatus(

@@ -171,13 +171,24 @@ export async function appendLeadsToSheet(
   } catch (error) {
     console.error("Error appending leads to Google Sheets:", error);
 
-    const errorCode =
-      typeof error === "object" && error !== null && "code" in error
-        ? (error as { code?: number }).code
-        : undefined;
+    // `status` is gaxios's documented HTTP-status field. `code` happens to
+    // carry the status too in gaxios 7.3.0, but it is typed for system errors
+    // (ECONNRESET, ENOTFOUND) and a library bump could stop mirroring the
+    // status there — which would silently kill the 404-reprovision and
+    // 401-reconnect recovery paths below with no compile error. Prefer
+    // `status`, keep `code` only as a fallback, and ignore non-numeric values
+    // so a string errno never accidentally compares equal to a status.
+    const gaxiosError =
+      typeof error === "object" && error !== null
+        ? (error as { status?: unknown; code?: unknown })
+        : {};
 
-    const notFound = errorCode === 404;
-    const authFailed = errorCode === 401 || errorCode === 403;
+    const httpStatus = [gaxiosError.status, gaxiosError.code].find(
+      (value): value is number => typeof value === "number"
+    );
+
+    const notFound = httpStatus === 404;
+    const authFailed = httpStatus === 401 || httpStatus === 403;
 
     return {
       success: false,

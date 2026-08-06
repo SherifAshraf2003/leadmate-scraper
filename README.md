@@ -71,7 +71,8 @@ cp .env.example .env.local
 # "Setting Up Google Sign-In" for how to create the OAuth client.
 
 # 4. Apply the database schema
-npx prisma migrate deploy
+#    (npm run db:migrate, NOT npx prisma migrate deploy — see the note below)
+npm run db:migrate
 
 # 5. Start the frontend
 npm run dev
@@ -82,6 +83,20 @@ npm run dev
 Signing in creates your account row in Postgres and, in the background, a private
 spreadsheet named `Leads — <your email>` in your own Google Drive — there is no
 shared spreadsheet and no service account involved.
+
+> **Why `npm run db:migrate` and not `npx prisma migrate deploy`?** Next.js
+> loads `.env.local`, but the Prisma CLI only ever reads `.env` — it does not
+> know `.env.local` exists. Running `npx prisma migrate deploy` directly
+> therefore fails with `Environment variable not found: DIRECT_URL`, even
+> though `DIRECT_URL` is sitting right there in your `.env.local`. The
+> `db:*` scripts in `package.json` source `.env.local` into the environment
+> first and then invoke Prisma, so they work with the file the rest of the
+> setup tells you to create. Use `npm run db:migrate` (apply migrations),
+> `npm run db:status` (see what is pending), and `npm run db:studio` (browse
+> the data). These scripts use POSIX shell syntax, so on Windows run them
+> from Git Bash or WSL. Nothing on Vercel is affected: there `DATABASE_URL`
+> and `DIRECT_URL` are real environment variables, so `npm run build`'s
+> `prisma migrate deploy` sees them without any of this.
 
 ---
 
@@ -266,12 +281,31 @@ create the OAuth client and get `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET`.
 #### 2.6 Apply the Database Schema
 
 ```bash
-npx prisma migrate deploy
+npm run db:migrate
 ```
 
 This creates the `User`, `Account`, `Session`, and `VerificationToken` tables
-that Auth.js and the sheet-linking logic use. In production this same command
-runs automatically as part of `npm run build` (see [Deployment](#-deployment)).
+that Auth.js and the sheet-linking logic use. In production this same migration
+step runs automatically as part of `npm run build` (see
+[Deployment](#-deployment)).
+
+> ⚠️ **Do not run `npx prisma migrate deploy` directly here.** The Prisma CLI
+> reads `.env`; Next.js reads `.env.local`. Since step 2.4 put your values in
+> `.env.local`, invoking Prisma directly fails with
+> `Environment variable not found: DIRECT_URL`. The `db:migrate` script sources
+> `.env.local` into the environment first, then runs the same Prisma command.
+> Two companion scripts use the same wrapper:
+>
+> ```bash
+> npm run db:status   # which migrations are applied / pending
+> npm run db:studio   # browse your data in Prisma Studio
+> ```
+>
+> They use POSIX shell syntax (`set -a && . ./.env.local && set +a`), so on
+> Windows run them from Git Bash or WSL rather than PowerShell or CMD.
+> If you would rather not use the scripts, the alternative is to keep a
+> separate `.env` containing at least `DATABASE_URL` and `DIRECT_URL` — but do
+> not move or rename `.env.local`, since Next.js needs it.
 
 #### 2.7 Start the Frontend
 

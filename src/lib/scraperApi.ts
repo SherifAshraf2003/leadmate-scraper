@@ -27,9 +27,16 @@ export async function fetchScrapeToken(): Promise<string> {
   const response = await fetch("/api/scrape-token", { method: "POST" });
 
   if (!response.ok) {
+    // 401 and 500 need different advice. 401 is the user's session; retrying
+    // after signing in works. 500 means /api/scrape-token could not sign the
+    // token at all — in practice a missing SCRAPE_TOKEN_SECRET on the server —
+    // which no amount of retrying by the user will fix, so say so instead of
+    // sending everyone into a retry loop against a permanently broken deploy.
     throw new Error(
       response.status === 401
         ? "You are signed out. Sign in again to scrape."
+        : response.status >= 500
+        ? "The server is not configured correctly and cannot authorize scraping. This is not something retrying will fix — please contact support."
         : "Could not get a scrape token"
     );
   }
@@ -177,6 +184,13 @@ export async function scrapeBusinessesBatch(
           } catch (saveError) {
             console.error(`Failed to save batch ${i + 1}:`, saveError);
             saveFailed = true;
+            // Stop, exactly as the scrape-401 break below does. A save failure
+            // is effectively never transient — a revoked Drive grant, an
+            // expired refresh token, a dead spreadsheet — so continuing would
+            // spend ~2 minutes scraping each remaining batch only to fail to
+            // save every one of them. Everything collected so far is already
+            // in allResults and is still returned and downloadable.
+            break;
           }
         }
 
@@ -233,7 +247,9 @@ export async function scrapeBusinessesBatch(
   }
 
   if (saveFailed) {
-    errorParts.push("Some batches failed to save to your spreadsheet");
+    errorParts.push(
+      "Saving to your spreadsheet failed, so the run stopped early. The leads fetched before that point are shown below and can still be downloaded."
+    );
   }
 
   return {

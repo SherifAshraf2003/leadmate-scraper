@@ -9,6 +9,12 @@ import {
 import { getUserGoogleClient, GoogleAuthError, RECONNECT } from "@/lib/googleClient";
 import { BusinessLead } from "@/lib/scraperApi";
 
+// The worst case here is a first save that also has to provision: a session
+// read, a user read, spreadsheets.create + values.update + batchUpdate, then
+// spreadsheets.get + batchGet + append — several Google round trips on a cold
+// lambda. Vercel's default 10s would 504 and lose that batch's leads.
+export const maxDuration = 60;
+
 export async function POST(request: NextRequest) {
   try {
     const session = await auth();
@@ -28,6 +34,11 @@ export async function POST(request: NextRequest) {
 
     const user = { id: session.user.id, email: session.user.email };
 
+    // Fetched once and threaded through every branch below. Provisioning and
+    // the 404-replacement path used to each build their own client, so a first
+    // save did the account lookup (and possibly a token refresh) twice.
+    const authClient = await getUserGoogleClient(user.id);
+
     let spreadsheetId = (
       await prisma.user.findUnique({
         where: { id: user.id },
@@ -36,10 +47,8 @@ export async function POST(request: NextRequest) {
     )?.spreadsheetId;
 
     if (!spreadsheetId) {
-      spreadsheetId = await provisionSheetForUser(user);
+      spreadsheetId = await provisionSheetForUser(user, authClient);
     }
-
-    const authClient = await getUserGoogleClient(user.id);
 
     let result = await appendLeadsToSheet(leads as BusinessLead[], {
       spreadsheetId,
@@ -58,7 +67,7 @@ export async function POST(request: NextRequest) {
         `Spreadsheet ${deadSpreadsheetId} not found for user ${user.id}; provisioning a replacement`
       );
 
-      const replacementId = await createSheetForUser(user);
+      const replacementId = await createSheetForUser(user, authClient);
 
       // Conditional write, mirroring provisionSheetForUser's own race guard:
       // if a concurrent request already recovered from the same dead id, its

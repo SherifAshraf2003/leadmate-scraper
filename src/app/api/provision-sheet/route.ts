@@ -3,6 +3,11 @@ import { auth } from "@/auth";
 import { provisionSheetForUser } from "@/lib/sheetProvisioning";
 import { GoogleAuthError } from "@/lib/googleClient";
 
+// spreadsheets.create + values.update + batchUpdate, preceded by a session
+// read and possibly a token refresh, all on a cold lambda. Vercel's default
+// 10s is not enough headroom for that.
+export const maxDuration = 60;
+
 export async function POST() {
   const session = await auth();
 

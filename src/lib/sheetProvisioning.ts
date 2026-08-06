@@ -1,4 +1,5 @@
 import { google } from "googleapis";
+import type { OAuth2Client } from "google-auth-library";
 import { prisma } from "./prisma";
 import { getUserGoogleClient } from "./googleClient";
 
@@ -8,12 +9,19 @@ export const LEAD_HEADERS = ["Name", "Emails", "Phones", "Website", "Date Added"
  * Creates a new spreadsheet with the Leads tab and headers in the user's
  * Drive. Pure creation only — does not read or write the database, so
  * callers control exactly when (and whether) the returned id is persisted.
+ *
+ * Pass `client` when the caller already holds a client for this user (a
+ * request that both provisions and appends needs exactly one), so the account
+ * lookup and any token refresh happen once per request instead of per call.
  */
-export async function createSheetForUser(user: {
-  id: string;
-  email: string;
-}): Promise<string> {
-  const authClient = await getUserGoogleClient(user.id);
+export async function createSheetForUser(
+  user: {
+    id: string;
+    email: string;
+  },
+  client?: OAuth2Client
+): Promise<string> {
+  const authClient = client ?? (await getUserGoogleClient(user.id));
   const sheets = google.sheets({ version: "v4", auth: authClient });
 
   const created = await sheets.spreadsheets.create({
@@ -60,10 +68,13 @@ export async function createSheetForUser(user: {
   return spreadsheetId;
 }
 
-export async function provisionSheetForUser(user: {
-  id: string;
-  email: string;
-}): Promise<string> {
+export async function provisionSheetForUser(
+  user: {
+    id: string;
+    email: string;
+  },
+  client?: OAuth2Client
+): Promise<string> {
   const existing = await prisma.user.findUnique({
     where: { id: user.id },
     select: { spreadsheetId: true },
@@ -73,9 +84,9 @@ export async function provisionSheetForUser(user: {
     return existing.spreadsheetId;
   }
 
-  const spreadsheetId = await createSheetForUser(user);
+  const spreadsheetId = await createSheetForUser(user, client);
 
-  // Conditional write: guards against a concurrent caller (createUser event, the retry route,
+  // Conditional write: guards against a concurrent caller (the linkAccount event, the retry route,
   // and Task 4's on-demand path can all race) that read spreadsheetId === null at the same time
   // and also created a sheet. Only the first writer's id gets stored; the loser's sheet is
   // orphaned in Drive but the database stays consistent and every caller converges on one id.
