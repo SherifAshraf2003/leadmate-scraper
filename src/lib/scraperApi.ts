@@ -9,6 +9,7 @@ export interface ScrapeResponse {
   success: boolean;
   data?: BusinessLead[];
   error?: string;
+  partial?: boolean;
 }
 
 export interface BatchProgress {
@@ -34,6 +35,10 @@ export async function fetchScrapeToken(): Promise<string> {
   }
 
   const data = await response.json();
+
+  if (typeof data.token !== "string") {
+    throw new Error("Could not get a scrape token");
+  }
 
   return data.token;
 }
@@ -134,27 +139,31 @@ export async function scrapeBusinessesBatch(
     };
   }
 
-  let token: string;
-
-  try {
-    token = await fetchScrapeToken();
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Could not authenticate",
-    };
-  }
-
   const batchSize = 10;
   const numBatches = Math.ceil(totalLeads / batchSize);
   const allResults: BusinessLead[] = [];
   let errorOccurred = false;
+  let saveFailed = false;
+  let authFailureMessage: string | undefined;
 
   for (let i = 0; i < numBatches; i++) {
     const start = i * batchSize;
     const limit = batchSize;
 
     console.log(`Fetching batch ${i + 1}/${numBatches}...`);
+
+    // Mint a fresh token for each batch: a full run (up to 6 batches, each
+    // ~110-135s) can outlive a single token's lifetime.
+    let token: string;
+
+    try {
+      token = await fetchScrapeToken();
+    } catch (error) {
+      authFailureMessage =
+        error instanceof Error ? error.message : "Could not authenticate";
+      errorOccurred = true;
+      break;
+    }
 
     try {
       const response = await scrapeBusinesses(query, start, limit, token);
@@ -167,6 +176,7 @@ export async function scrapeBusinessesBatch(
             await onBatchSaved(response.data);
           } catch (saveError) {
             console.error(`Failed to save batch ${i + 1}:`, saveError);
+            saveFailed = true;
           }
         }
 
@@ -181,6 +191,12 @@ export async function scrapeBusinessesBatch(
       } else {
         console.error(`Error in batch ${i + 1}:`, response.error);
         errorOccurred = true;
+
+        if (response.error?.includes("401")) {
+          // The token was rejected mid-run; further batches cannot succeed.
+          authFailureMessage = "You are signed out. Sign in again to scrape.";
+          break;
+        }
       }
 
       // Add 5-8 second delay between API calls (except for last batch)
@@ -208,9 +224,22 @@ export async function scrapeBusinessesBatch(
     }
   }
 
+  const errorParts: string[] = [];
+
+  if (authFailureMessage) {
+    errorParts.push(authFailureMessage);
+  } else if (errorOccurred) {
+    errorParts.push("Some batches failed to fetch");
+  }
+
+  if (saveFailed) {
+    errorParts.push("Some batches failed to save to your spreadsheet");
+  }
+
   return {
     success: !errorOccurred || allResults.length > 0,
     data: allResults,
-    error: errorOccurred ? "Some batches failed to fetch" : undefined,
+    partial: errorOccurred || saveFailed,
+    error: errorParts.length > 0 ? errorParts.join("; ") : undefined,
   };
 }
