@@ -10,6 +10,32 @@ export interface ScrapeResponse {
   data?: BusinessLead[];
   error?: string;
   partial?: boolean;
+  /**
+   * The run stopped because the account's daily lead cap was reached. The UI
+   * shows this as a hard error rather than a generic failure, because unlike a
+   * flaky batch it will not resolve by retrying before the UTC reset.
+   */
+  limitReached?: boolean;
+}
+
+/** A grant of daily allowance, plus the token that spends it. */
+export interface ScrapeTokenGrant {
+  token: string;
+  /** Leads this token authorises — may be less than was requested. */
+  maxLeads: number;
+  /** Daily allowance left after this grant. */
+  remaining: number;
+}
+
+/** A /api/scrape-token failure that kept the HTTP status, so callers can branch on it. */
+export class ScrapeTokenError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ScrapeTokenError";
+    this.status = status;
+  }
 }
 
 export interface BatchProgress {
@@ -17,37 +43,73 @@ export interface BatchProgress {
   totalBatches: number;
   totalLeads: number;
   delay?: number;
+  /** Daily allowance left after the batch's token was minted. */
+  remaining?: number;
 }
 
 export type ProgressCallback = (progress: BatchProgress) => void;
 
 export type BatchSavedCallback = (leads: BusinessLead[]) => Promise<void>;
 
-export async function fetchScrapeToken(): Promise<string> {
-  const response = await fetch("/api/scrape-token", { method: "POST" });
+/**
+ * Mints a scrape token, debiting `requested` leads from the daily allowance.
+ *
+ * The returned `maxLeads` can be smaller than `requested` when the allowance
+ * is nearly spent — callers must scrape `maxLeads`, not what they asked for.
+ */
+export async function fetchScrapeToken(
+  requested: number
+): Promise<ScrapeTokenGrant> {
+  const response = await fetch("/api/scrape-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requested }),
+  });
 
   if (!response.ok) {
-    // 401 and 500 need different advice. 401 is the user's session; retrying
-    // after signing in works. 500 means /api/scrape-token could not sign the
-    // token at all — in practice a missing SCRAPE_TOKEN_SECRET on the server —
-    // which no amount of retrying by the user will fix, so say so instead of
-    // sending everyone into a retry loop against a permanently broken deploy.
-    throw new Error(
+    // 401, 429 and 500 need different advice. 401 is the user's session;
+    // retrying after signing in works. 429 is the daily cap, and the server
+    // already wrote a message naming the actual limit and the reset time, so
+    // pass it through verbatim — a generic string here would throw away the
+    // only two facts the user needs. 500 means /api/scrape-token could not
+    // sign the token at all — in practice a missing SCRAPE_TOKEN_SECRET on
+    // the server — which no amount of retrying by the user will fix, so say
+    // so instead of sending everyone into a retry loop against a permanently
+    // broken deploy.
+    let serverMessage: string | undefined;
+
+    if (response.status === 429) {
+      try {
+        serverMessage = (await response.json())?.error;
+      } catch {
+        serverMessage = undefined;
+      }
+    }
+
+    throw new ScrapeTokenError(
       response.status === 401
         ? "You are signed out. Sign in again to scrape."
+        : response.status === 429
+        ? serverMessage ??
+          "You have reached your daily lead limit. It resets at midnight UTC."
         : response.status >= 500
         ? "The server is not configured correctly and cannot authorize scraping. This is not something retrying will fix — please contact support."
-        : "Could not get a scrape token"
+        : "Could not get a scrape token",
+      response.status
     );
   }
 
   const data = await response.json();
 
   if (typeof data.token !== "string") {
-    throw new Error("Could not get a scrape token");
+    throw new ScrapeTokenError("Could not get a scrape token", response.status);
   }
 
-  return data.token;
+  return {
+    token: data.token,
+    maxLeads: typeof data.maxLeads === "number" ? data.maxLeads : requested,
+    remaining: typeof data.remaining === "number" ? data.remaining : 0,
+  };
 }
 
 /**
@@ -152,28 +214,46 @@ export async function scrapeBusinessesBatch(
   let errorOccurred = false;
   let saveFailed = false;
   let authFailureMessage: string | undefined;
+  let limitReachedMessage: string | undefined;
 
   for (let i = 0; i < numBatches; i++) {
     const start = i * batchSize;
-    const limit = batchSize;
 
     console.log(`Fetching batch ${i + 1}/${numBatches}...`);
 
     // Mint a fresh token for each batch: a full run (up to 6 batches, each
-    // ~110-135s) can outlive a single token's lifetime.
-    let token: string;
+    // ~110-135s) can outlive a single token's lifetime. Each mint also debits
+    // the account's daily allowance, so a batch can be granted less than it
+    // asked for — or nothing at all.
+    let grant: ScrapeTokenGrant;
 
     try {
-      token = await fetchScrapeToken();
+      grant = await fetchScrapeToken(batchSize);
     } catch (error) {
+      if (error instanceof ScrapeTokenError && error.status === 429) {
+        // The daily cap ran out mid-run. Stop, exactly as the scrape-401 and
+        // save-failure breaks do: every remaining batch would be refused the
+        // same way, and nothing about waiting ~2 minutes per batch changes
+        // that before the UTC reset. Everything collected so far is already in
+        // allResults and is still returned and downloadable.
+        limitReachedMessage = error.message;
+        errorOccurred = true;
+        break;
+      }
+
       authFailureMessage =
         error instanceof Error ? error.message : "Could not authenticate";
       errorOccurred = true;
       break;
     }
 
+    // Ask the backend for exactly what was paid for. A partial grant near the
+    // cap would otherwise request a full batch and scrape leads the allowance
+    // never covered.
+    const limit = Math.min(batchSize, grant.maxLeads);
+
     try {
-      const response = await scrapeBusinesses(query, start, limit, token);
+      const response = await scrapeBusinesses(query, start, limit, grant.token);
 
       if (response.success && response.data) {
         allResults.push(...response.data);
@@ -200,6 +280,7 @@ export async function scrapeBusinessesBatch(
             currentBatch: i + 1,
             totalBatches: numBatches,
             totalLeads: allResults.length,
+            remaining: grant.remaining,
           });
         }
       } else {
@@ -227,6 +308,7 @@ export async function scrapeBusinessesBatch(
             totalBatches: numBatches,
             totalLeads: allResults.length,
             delay: Math.round(delay / 1000),
+            remaining: grant.remaining,
           });
         }
 
@@ -240,7 +322,11 @@ export async function scrapeBusinessesBatch(
 
   const errorParts: string[] = [];
 
-  if (authFailureMessage) {
+  if (limitReachedMessage) {
+    errorParts.push(
+      `${limitReachedMessage} The run stopped early because your daily lead limit was reached. The ${allResults.length} leads fetched before that point are shown below and can still be downloaded.`
+    );
+  } else if (authFailureMessage) {
     errorParts.push(authFailureMessage);
   } else if (errorOccurred) {
     errorParts.push("Some batches failed to fetch");
@@ -256,6 +342,7 @@ export async function scrapeBusinessesBatch(
     success: !errorOccurred || allResults.length > 0,
     data: allResults,
     partial: errorOccurred || saveFailed,
+    limitReached: limitReachedMessage !== undefined,
     error: errorParts.length > 0 ? errorParts.join("; ") : undefined,
   };
 }

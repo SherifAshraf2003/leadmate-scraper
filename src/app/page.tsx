@@ -69,6 +69,11 @@ export default function Home() {
   const [sheetsStatus, setSheetsStatus] = useState<string | null>(null);
   const [provisioning, setProvisioning] = useState(false);
   const [partialWarning, setPartialWarning] = useState<string | null>(null);
+  // Daily allowance left, as of the last token this page minted. Null until
+  // the first mint of the session — there is no cheap way to know it before
+  // then, and showing a stale or guessed number would be worse than showing
+  // nothing.
+  const [remainingLeads, setRemainingLeads] = useState<number | null>(null);
   const { data: session, status } = useSession();
   const savedTotalsRef = useRef({ newLeadsAdded: 0, duplicatesSkipped: 0 });
 
@@ -161,12 +166,25 @@ export default function Home() {
         response = await scrapeBusinessesBatch(
           query,
           totalLeads,
-          (progress) => setBatchProgress(progress),
+          (progress) => {
+            setBatchProgress(progress);
+
+            if (typeof progress.remaining === "number") {
+              setRemainingLeads(progress.remaining);
+            }
+          },
           saveLeads
         );
       } else {
-        const token = await fetchScrapeToken();
-        response = await scrapeBusinesses(query, 0, totalLeads, token);
+        const grant = await fetchScrapeToken(totalLeads);
+        setRemainingLeads(grant.remaining);
+        // Scrape what the allowance actually paid for, not what was asked for.
+        response = await scrapeBusinesses(
+          query,
+          0,
+          Math.min(totalLeads, grant.maxLeads),
+          grant.token
+        );
 
         if (response.success && response.data) {
           try {
@@ -181,11 +199,21 @@ export default function Home() {
         }
       }
 
+      if (response.limitReached) {
+        setRemainingLeads(0);
+      }
+
       if (response.success && response.data) {
         setResults(response.data);
         setBatchProgress(null);
 
-        if (response.partial && response.error) {
+        if (response.limitReached && response.error) {
+          // Hitting the cap is not a flaky-batch warning: retrying will not
+          // help until the UTC reset, so it gets the red error banner rather
+          // than the amber "partial run" note. The leads already fetched are
+          // still rendered below it.
+          setError(response.error);
+        } else if (response.partial && response.error) {
           setPartialWarning(response.error);
         }
       } else {
@@ -253,6 +281,18 @@ export default function Home() {
             >
               {provisioning ? "Setting up…" : "Set up your sheet"}
             </button>
+          )}
+          {remainingLeads !== null && (
+            <span
+              title="Your daily lead allowance resets at midnight UTC"
+              className={
+                remainingLeads === 0
+                  ? "text-red-600 dark:text-red-400 font-medium"
+                  : "text-gray-500 dark:text-gray-400"
+              }
+            >
+              {remainingLeads} leads left today
+            </span>
           )}
           <span className="text-gray-500 dark:text-gray-400">{session.user?.email}</span>
           <button

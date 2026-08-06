@@ -17,8 +17,27 @@ model User {
   spreadsheetId String?
   createdAt     DateTime  @default(now())
 
-  accounts Account[]
-  sessions Session[]
+  // Leads this account may scrape per UTC day. Enforced in
+  // src/lib/scrapeUsage.ts and carried to the backend as the token's
+  // `maxLeads` claim.
+  dailyLeadLimit Int @default(200)
+
+  accounts    Account[]
+  sessions    Session[]
+  scrapeUsage ScrapeUsage[]
+}
+
+/// One row per user per UTC day, so the cap is auditable history rather than
+/// an opaque counter that resets in place.
+model ScrapeUsage {
+  id     String   @id @default(cuid())
+  userId String
+  day    DateTime @db.Date
+  leads  Int      @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, day])
 }
 
 model Account {
