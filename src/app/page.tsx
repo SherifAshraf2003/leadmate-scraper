@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
 import {
   scrapeBusinesses,
@@ -71,6 +71,7 @@ export default function Home() {
   const [provisioning, setProvisioning] = useState(false);
   const [partialWarning, setPartialWarning] = useState<string | null>(null);
   const { data: session, status } = useSession();
+  const savedTotalsRef = useRef({ newLeadsAdded: 0, duplicatesSkipped: 0 });
 
   const saveLeads = async (leads: BusinessLead[]) => {
     const response = await fetch("/api/save-to-sheets", {
@@ -83,11 +84,20 @@ export default function Home() {
 
     if (data.success) {
       setSpreadsheetId(data.data.spreadsheetId);
+      savedTotalsRef.current = {
+        newLeadsAdded:
+          savedTotalsRef.current.newLeadsAdded + (data.data.newLeadsAdded ?? 0),
+        duplicatesSkipped:
+          savedTotalsRef.current.duplicatesSkipped +
+          (data.data.duplicatesSkipped ?? 0),
+      };
       setSheetsStatus(
-        `✅ Saved to your sheet: ${data.data.newLeadsAdded} new, ${data.data.duplicatesSkipped} duplicates skipped`
+        `✅ Saved to your sheet: ${savedTotalsRef.current.newLeadsAdded} new, ${savedTotalsRef.current.duplicatesSkipped} duplicates skipped`
       );
     } else {
-      setSheetsStatus(`⚠️ Google Sheets: ${data.error}`);
+      const message = data.error || "Failed to save to your spreadsheet";
+      setSheetsStatus(`⚠️ Google Sheets: ${message}`);
+      throw new Error(message);
     }
   };
 
@@ -102,8 +112,16 @@ export default function Home() {
         setSpreadsheetId(data.spreadsheetId);
         setSheetsStatus(null);
       } else {
-        setSheetsStatus(`⚠️ Could not create your sheet: ${data.error}`);
+        setSheetsStatus(
+          `⚠️ Could not create your sheet: ${data.error || "Unknown error"}`
+        );
       }
+    } catch (err) {
+      setSheetsStatus(
+        `⚠️ Could not create your sheet: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`
+      );
     } finally {
       setProvisioning(false);
     }
@@ -121,6 +139,7 @@ export default function Home() {
     setBatchProgress(null);
     setSheetsStatus(null);
     setPartialWarning(null);
+    savedTotalsRef.current = { newLeadsAdded: 0, duplicatesSkipped: 0 };
 
     try {
       let response;
@@ -137,7 +156,15 @@ export default function Home() {
         response = await scrapeBusinesses(query, 0, totalLeads, token);
 
         if (response.success && response.data) {
-          await saveLeads(response.data);
+          try {
+            await saveLeads(response.data);
+          } catch (saveError) {
+            setPartialWarning(
+              saveError instanceof Error
+                ? saveError.message
+                : "Some leads may not have reached your spreadsheet"
+            );
+          }
         }
       }
 
@@ -515,8 +542,11 @@ export default function Home() {
         {/* Partial Run Warning */}
         {partialWarning && !loading && (
           <div className="bg-amber-50/80 dark:bg-amber-900/20 backdrop-blur-sm border-2 border-amber-300 dark:border-amber-800 rounded-2xl p-4 mb-6 shadow-lg">
+            <p className="text-sm font-bold text-amber-900 dark:text-amber-100 mb-1">
+              ⚠️ Partial run
+            </p>
             <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
-              ⚠️ {partialWarning}
+              {partialWarning}
             </p>
           </div>
         )}
