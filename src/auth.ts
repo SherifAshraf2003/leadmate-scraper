@@ -48,6 +48,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async signIn({ account }) {
       if (!account?.provider || !account.providerAccountId) return;
 
+      // Structural guard: without it a token-less account payload — the email
+      // and webauthn branches fire events.signIn at
+      // @auth/core/lib/actions/callback/index.js:276 and :366 — would reach
+      // updateMany with an empty `data: {}`. Unreachable with only Google
+      // configured, and it sits inside the try/catch below either way, but one
+      // line makes it impossible rather than merely unlikely.
+      if (!account.access_token && !account.refresh_token) return;
+
       try {
         await prisma.account.updateMany({
           where: {
