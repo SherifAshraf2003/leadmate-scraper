@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 import type { OAuth2Client } from "google-auth-library";
 import { BusinessLead } from "./scraperApi";
-import { LEAD_HEADERS } from "./sheetProvisioning";
+import { LEAD_HEADERS, LEAD_LAST_COLUMN } from "./sheetProvisioning";
 
 /**
  * Creates a unique key for a business lead to identify duplicates
@@ -28,6 +28,8 @@ const leadToRow = (lead: BusinessLead): string[] => {
     lead.phones?.join(", ") || "",
     lead.website || "",
     new Date().toISOString(), // Timestamp
+    lead.whatsappNumber || "",
+    lead.whatsappSource || "",
   ];
 };
 
@@ -85,7 +87,7 @@ export async function appendLeadsToSheet(
       });
       await sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: `${sheetName}!A1:E1`,
+        range: `${sheetName}!A1:${LEAD_LAST_COLUMN}1`,
         valueInputOption: "RAW",
         requestBody: { values: [LEAD_HEADERS] },
       });
@@ -148,7 +150,7 @@ export async function appendLeadsToSheet(
 
       const appendResponse = await sheets.spreadsheets.values.append({
         spreadsheetId,
-        range: `${sheetName}!A:E`,
+        range: `${sheetName}!A:${LEAD_LAST_COLUMN}`,
         valueInputOption: "RAW",
         requestBody: {
           values: newRows,

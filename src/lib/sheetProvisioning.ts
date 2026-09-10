@@ -3,7 +3,27 @@ import type { OAuth2Client } from "google-auth-library";
 import { prisma } from "./prisma";
 import { getUserGoogleClient } from "./googleClient";
 
-export const LEAD_HEADERS = ["Name", "Emails", "Phones", "Website", "Date Added"];
+export const LEAD_HEADERS = [
+  "Name",
+  "Emails",
+  "Phones",
+  "Website",
+  "Date Added",
+  // Appended rather than inserted so the columns of sheets provisioned
+  // before WhatsApp capture existed do not shift under their data.
+  "WhatsApp",
+  "WhatsApp Source",
+];
+
+/**
+ * Last column letter the header row occupies, derived from LEAD_HEADERS so
+ * that adding a column does not require finding every hardcoded A1:E1 range.
+ * Correct while LEAD_HEADERS stays within 26 columns, which the two-letter
+ * case would otherwise need to handle.
+ */
+export const LEAD_LAST_COLUMN = String.fromCharCode(
+  "A".charCodeAt(0) + LEAD_HEADERS.length - 1
+);
 
 /**
  * Creates a new spreadsheet with the Leads tab and headers in the user's
@@ -40,7 +60,7 @@ export async function createSheetForUser(
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: "Leads!A1:E1",
+    range: `Leads!A1:${LEAD_LAST_COLUMN}1`,
     valueInputOption: "RAW",
     requestBody: { values: [LEAD_HEADERS] },
   });

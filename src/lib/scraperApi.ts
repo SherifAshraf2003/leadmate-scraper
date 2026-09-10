@@ -3,6 +3,13 @@ export interface BusinessLead {
   emails?: string[];
   website?: string;
   phones?: string[];
+  /** True only when a dialable WhatsApp number was found, not merely a link. */
+  hasWhatsApp?: boolean;
+  whatsappLink?: string | null;
+  /** The number itself, in +<digits> form, or national form when no country code was present. */
+  whatsappNumber?: string | null;
+  /** Which signal found it: "maps" | "link" | "widget" | "iframe" | "html" | "text". */
+  whatsappSource?: string | null;
 }
 
 export interface ScrapeResponse {
